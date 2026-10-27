@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package gamepb;
+
+option go_package = "rumue.io/asm/examples/gamemeta/gamepb";
+
+// Player is the entity of the game meta services. status, region, flagged, tier, subscription, platform
+// and party are in the bitmap, the other fields are plain data.
+message Player {
+  string id = 1;
+  // lobby, in_match or banned
+  string status = 2;
+  // eu or us
+  string region = 3;
+  bool flagged = 4;
+  int64 coins = 5;
+  string match_id = 6;
+  // bronze, silver, gold or diamond
+  string tier = 7;
+  // free or premium
+  string subscription = 8;
+  // pc, console or mobile
+  string platform = 9;
+  // a nested part of the bitmap
+  Party party = 10;
+  // results since the last rank update
+  int64 wins = 11;
+  int64 losses = 12;
+  // points scored in all matches
+  int64 score = 13;
+}
+
+// Party is the group a player queues with. It is also the payload of the PARTY event.
+message Party {
+  // solo, leader or member
+  string role = 1;
+  // 1 to 4
+  int64 size = 2;
+}
+
+// Match is the second entity of the cluster: a match of up to 4 players on one platform, kept by the arena.
+// status, platform and size are in its bitmap, the other fields are plain data.
+message Match {
+  string id = 1;
+  // open, full or finished
+  string status = 2;
+  // pc, console or mobile
+  string platform = 3;
+  // 1 to 4 players
+  int64 size = 4;
+  repeated string players = 5;
+  // results reported so far
+  int64 reported = 6;
+  repeated string winners = 7;
+}
+
+// JoinMatch is emitted by matchmaking for the Match container of the match id.
+message JoinMatch {
+  string match_id = 1;
+  string player_id = 2;
+  string platform = 3;
+}
+
+// MatchBonus is emitted by the arena for the Player container of every winner of a finished match.
+message MatchBonus {
+  string player_id = 1;
+  string match_id = 2;
+  int64 coins = 3;
+}
+
+// QueueRequest asks matchmaking to put the player into a match.
+message QueueRequest {
+  string player_id = 1;
+}
+
+// Score is reported during a match, progression adds the points up in batches.
+message Score {
+  string player_id = 1;
+  int64 points = 2;
+}
+
+// MatchResult is reported after a match, anti-cheat reviews it and progression counts it.
+// outcome is in the MatchResult bitmap, so transitions can match on it.
+message MatchResult {
+  string player_id = 1;
+  // 0 to 100, how suspicious the player's stats in the match were
+  int64 suspicion = 2;
+  // win or loss
+  string outcome = 3;
+  // the arena records the result in the Match container of this id
+  string match_id = 4;
+}
+
+// RankUp is emitted by progression when a player is promoted, the store pays a reward for the new tier.
+message RankUp {
+  string player_id = 1;
+  string tier = 2;
+}
+
+// Appeal asks anti-cheat to review the flag or the ban of a player.
+message Appeal {
+  string player_id = 1;
+}
+
+// PurchaseRequest buys an item in the store.
+message PurchaseRequest {
+  string player_id = 1;
+  string item = 2;
+  int64 price = 3;
+}
+
+// MatchEnd moves the player back to the lobby.
+message MatchEnd {
+  string player_id = 1;
+}

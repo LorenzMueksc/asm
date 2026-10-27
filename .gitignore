@@ -1,0 +1,13 @@
+# agent scratch space: temp files, logs, test binaries, backups
+.scratch/
+
+# build and test outputs
+*.exe
+*.test
+*.out
+*.prof
+*.pb.gz
+*.log
+
+# web tooling (devtool/web/dist stays tracked: go:embed needs it)
+node_modules/

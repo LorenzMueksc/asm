@@ -1,0 +1,390 @@
+syntax = "proto3";
+
+package service;
+
+option go_package = "/service";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "models.proto";
+
+message JoinRequest {
+  string listenAddr = 1;
+  reserved 2;
+  reserved "transitions";
+}
+
+message JoinResponse {
+  message Peer {
+    uint64 id = 1;
+    string addr = 2;
+  }
+  repeated Peer peers = 1;
+  // index of the entry which added the node. The joining node replays the log and ignores
+  // removals of an earlier node with its id up to this index.
+  uint64 added_index = 2;
+}
+
+// RemovePeerRequest asks the leader to remove a node from the cluster.
+message RemovePeerRequest {
+  uint64 node_id = 1;
+}
+
+message RemovePeerResponse {}
+
+message EventRequest {
+  string event_name = 1;
+  google.protobuf.Any payload = 2;
+  message EventOptions {
+    map<string, string> meta = 1;
+    reserved 2;
+    reserved "close_after";
+  }
+  EventOptions options = 4;
+}
+
+message EventResponse {
+  string container_id = 1;
+}
+
+message SyncRequest {
+  repeated bytes messages = 1;
+}
+
+message SyncResponse {
+  bool acked = 1;
+}
+
+message ProposeRequest {
+  repeated NodeLog logs = 1;
+}
+
+message ProposeResponse {
+  bool acked = 1;
+}
+
+message GetTransitionsRequest {}
+
+message GetTransitionsResponse {
+  repeated Transition transitions = 1;
+}
+
+message AddTransitionsRequest {
+  repeated Transition transitions = 1;
+}
+
+message AddTransitionsResponse {}
+
+// ForwardEventRequest sends events of a container to a node owning transitions which listen to them.
+// The receiving node decides which of its own func transitions run.
+message ForwardEventRequest {
+  string event_name = 1;
+  string container_id = 2;
+  // entity of the sender, only sent with wait
+  google.protobuf.Any entity = 3;
+  // payloads of the batched events, in order
+  repeated google.protobuf.Any payloads = 4;
+  reserved 5;
+  reserved "holder_node_id";
+  // wait: the sender waits for the result and lends its lock, the receiver executes right away
+  // with the sent entity. Otherwise the receiver accepts the request, acquires the lock itself
+  // once the sender released it, loads the entity with its init func and executes then.
+  bool wait = 6;
+  // transitions the receiver must not run, because the sender or another node runs them
+  repeated string exclude = 7;
+  // node which sent the events
+  string sender_node_id = 8;
+  // with wait: the nodes lending the lock, in order. The first one holds it in the lock table,
+  // the last one is the sender. A node running on a lent lock lends it on while it waits for the answer.
+  repeated string lend_chain = 9;
+  // root bitmap name of the sender's entity. Events of another entity than the receiver's go to the containers
+  // the receiver's container id func chooses per payload, on their own locks: nothing is lent and no entity returned.
+  string sender_entity = 10;
+  // with wait: the lock tokens of the containers waiting for the answer, up the chain of waited calls.
+  // A receiver of another entity acquires its container's lock with them, so waits across entities can't deadlock.
+  repeated string wait_path = 11;
+  // the trace of every payload (same order), its parent being the sender's FORWARD span; empty without tracing
+  repeated TraceRef traces = 12;
+  // without wait: id of the hand-over, unique per sender over restarts ("<sender node id>-<seq>/<transitions>").
+  // The receiver runs a hand-over sent again with a known id only once: it answers a queued or running one once its
+  // work ran, a done one (kept for a while) right away.
+  string handover_id = 13;
+  // a waited call of the container target_id of the receiver's entity (Emit WithTarget), sent on to the node holding
+  // the target's lock: it runs on the target's own lock like a call of another entity
+  string target_id = 14;
+  // the waited call was sent on to the node holding the target's lock: that node runs it, it doesn't send it on again
+  bool redirected = 15;
+}
+
+// CheckLendingRequest asks the last lender of a lend chain whether it runs on the lent lock of the container.
+message CheckLendingRequest {
+  string container_id = 1;
+  // the chain the lender received, without itself
+  repeated string lend_chain = 2;
+}
+
+message CheckLendingResponse {
+  bool lending = 1;
+}
+
+message ForwardEventResponse {
+  // entity after the receiver's transitions ran, unless changed_state describes all changes
+  google.protobuf.Any entity = 1;
+  // bits of the properties the receiver changed in the bitmap of the entity.
+  // Sent instead of the entity when applying them to the sent entity gives the receiver's entity.
+  Bits changed_state = 2;
+  // replies of the receiver's transitions (Container.Reply) to a waited call, one per container that replied
+  repeated google.protobuf.Any replies = 3;
+}
+
+// AttachRequest is sent by a client node to its member: the first one names the client, later ones change the
+// locks it watches.
+message AttachRequest {
+  uint64 client_id = 1;
+  string addr = 2;
+  // container ids whose locks the client wants to know besides its own (eg. to verify a lender), or no longer
+  repeated string watch = 3;
+  repeated string unwatch = 4;
+}
+
+// AttachUpdate keeps a client node up to date: the member sends the state when the client attaches (full),
+// then the changes.
+message AttachUpdate {
+  uint64 leader = 1;
+  uint64 term = 2;
+  // the committed bitmap, when it changed
+  Bitmap layout = 3;
+  // the nodes of the cluster when they changed (membership set): addresses by id, the raft members among them,
+  // the removed ids
+  bool membership = 4;
+  map<uint64, string> peers = 5;
+  repeated uint64 members = 6;
+  repeated uint64 removed = 7;
+  // liveness of the nodes by id, when sent
+  map<string, NodeSnapshot.Liveness> liveness = 8;
+  // locks the client holds, waits for, calls into or watches, as they are now; a lock without holder is free
+  repeated NodeSnapshot.Lock locks = 9;
+  // acquires of the client the lock table refused
+  repeated ContainerLock refused = 10;
+  // the first update: locks are all locks of the client and its watches
+  bool full = 11;
+}
+
+// ForwardCalls is a batch of forwarded events a node sends over the ForwardEvents stream.
+message ForwardCalls {
+  repeated ForwardCall calls = 1;
+  // ids of calls the sender gave up on, the receiver cancels them
+  repeated uint64 cancel = 2;
+}
+
+message ForwardCall {
+  // id the reply refers to, unique on the stream
+  uint64 id = 1;
+  ForwardEventRequest request = 2;
+}
+
+// ForwardReplies are replies to forwarded events, in the order the calls finished.
+message ForwardReplies {
+  repeated ForwardReply replies = 1;
+}
+
+// ForwardReply answers a call. A hand-over (no wait) gets two: the accept, then one with executed once its work ran
+// (also when its transitions failed: those errors stay with the receiver). A receiver which can't run an accepted
+// hand-over anymore (it leaves) replies with an error code instead, the sender hands it to another owner.
+// A hand-over with a done id is answered with executed right away.
+message ForwardReply {
+  uint64 id = 1;
+  ForwardEventResponse response = 2;
+  // gRPC status code of the call, 0 if it succeeded, and the error message
+  uint32 code = 3;
+  string message = 4;
+  // the work of the hand-over ran
+  bool executed = 5;
+}
+
+// Introspection for dev tools: the state of a node as it sees the cluster.
+
+message InspectRequest {
+  // at most this many locks and containers are returned, 0 returns all
+  uint32 limit = 1;
+}
+
+message InspectResponse {
+  NodeInfo node = 1;
+  // published transitions of the node, its own and the ones synced from other nodes
+  repeated InspectTransition transitions = 2;
+  // committed bitmap layout
+  Bitmap layout = 3;
+  // container locks of the cluster, sorted by container id, at most limit
+  repeated NodeSnapshot.Lock locks = 4;
+  // containers open on the node, sorted by id, at most limit
+  repeated ContainerInfo containers = 5;
+  // counters, gauges and latency histograms of the node, the same as on its Prometheus endpoint (WithMetricsAddr)
+  repeated Metric metrics = 6;
+  // number of locks and of open containers, also when not all are returned
+  uint32 lock_count = 7;
+  uint32 container_count = 8;
+}
+
+// Metric is a counter, gauge or histogram of a node.
+message Metric {
+  enum Kind {
+    COUNTER = 0;
+    GAUGE = 1;
+    HISTOGRAM = 2;
+  }
+  string name = 1;
+  string help = 2;
+  Kind kind = 3;
+  // value of a counter or gauge
+  double value = 4;
+  // histogram: upper bounds of the buckets in seconds, the observations per bucket (not cumulative, one more
+  // for the observations above the last bound), their sum in seconds and their count
+  repeated double bounds = 5;
+  repeated uint64 counts = 6;
+  double sum = 7;
+  uint64 count = 8;
+}
+
+message NodeInfo {
+  string id = 1;
+  string listen_addr = 2;
+  bool ready = 3;
+  // error the node failed with
+  string error = 4;
+  // the node runs without raft (WithSkipRaft)
+  bool skip_raft = 5;
+  string raft_state = 6;
+  uint64 leader = 7;
+  uint64 term = 8;
+  uint64 commit_index = 9;
+  uint64 applied_index = 10;
+  uint64 snapshot_index = 11;
+  // listen addresses by node id
+  map<uint64, string> peers = 12;
+  repeated uint64 removed = 13;
+  // liveness by node id, from the heartbeats in the log
+  map<string, NodeSnapshot.Liveness> liveness = 14;
+  uint32 max_containers = 15;
+  // capacity of the event trace (WithEventTrace), 0 if it is disabled
+  uint32 trace_capacity = 16;
+  // root bitmap name of the entity of the node
+  string entity = 17;
+  // the node is a client (WithClientMode): no raft, it uses the lock table through the member it is attached to
+  bool client = 18;
+  string attached_to = 19;
+}
+
+message InspectTransition {
+  Transition transition = 1;
+  // nodes owning the transition
+  repeated string node_ids = 2;
+  // this node doesn't own the transition, matching events are forwarded to an owner
+  bool remote = 3;
+  // key of the func of an own func transition
+  string func_key = 4;
+}
+
+message ContainerInfo {
+  string id = 1;
+  // running, closing or closed
+  string status = 2;
+  // events, work and batch timers the container has to finish before it can close
+  int64 pending = 3;
+  // the container was processing: entity, states and batches are the ones when the current event started
+  // (kept with WithEventTrace), otherwise empty
+  bool busy = 4;
+  string entity_type = 5;
+  string entity_json = 6;
+  // state bits by root entity bitmap name
+  map<string, Bits> states = 7;
+  // batches waiting for more events: transition name, or "route:" and the event name for forwarded events,
+  // and the number of events
+  map<string, uint32> batches = 8;
+}
+
+message WatchEventsRequest {
+  // only events with a higher sequence number are sent, 0 sends the whole trace first
+  uint64 after_seq = 1;
+}
+
+// TraceEvent is an entry of the event trace of a node (WithEventTrace).
+message TraceEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // an event processed by a container of the node
+    EVENT = 1;
+    // events forwarded to other nodes
+    FORWARD = 2;
+    // events another node forwarded to the node
+    RECEIVED = 3;
+    // an error of a container
+    ERROR = 4;
+    CONTAINER_STARTED = 5;
+    CONTAINER_CLOSED = 6;
+  }
+  uint64 seq = 1;
+  google.protobuf.Timestamp ts = 2;
+  string node_id = 3;
+  Kind kind = 4;
+  string container_id = 5;
+  string event_name = 6;
+  repeated TracePayload payloads = 7;
+  // own transitions which ran or were queued in a batch
+  repeated string transitions = 8;
+  // remote transitions the events matched
+  repeated string remote_transitions = 9;
+  // FORWARD: the nodes the events were sent to
+  repeated TraceRoute routes = 10;
+  // the sender waited for the result (WithWaitRemote)
+  bool wait = 11;
+  // RECEIVED: the node which sent the events and the transitions it excluded
+  string from_node = 12;
+  repeated string excluded = 13;
+  string error = 14;
+  google.protobuf.Duration duration = 15;
+  // span of the entry (EVENT, FORWARD, RECEIVED, ERROR), it started duration before ts
+  string span_id = 16;
+  // the traces the entry belongs to with its parent span in each; a batch of events of several traces belongs to all
+  repeated TraceRef traces = 17;
+}
+
+// TraceRef places a span in a trace (WithEventTrace): a trace starts with an event sent to a container and follows it
+// through forwards, emitted events and calls of other entities over all nodes.
+message TraceRef {
+  string trace_id = 1;
+  // the span this one is part of, empty for the first span of a trace
+  string parent_span_id = 2;
+}
+
+message TracePayload {
+  string type = 1;
+  string json = 2;
+}
+
+message TraceRoute {
+  string node_id = 1;
+  repeated string transitions = 2;
+  string error = 3;
+}
+
+service Node {
+  rpc Event(EventRequest) returns (EventResponse);
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
+  rpc Sync(SyncRequest) returns (SyncResponse);
+  // SyncStream carries the raft messages of a member to another one, every request is acked in order
+  rpc SyncStream(stream SyncRequest) returns (stream SyncResponse);
+  rpc Propose(ProposeRequest) returns (ProposeResponse);
+  rpc GetTransitions(GetTransitionsRequest) returns (GetTransitionsResponse);
+  rpc AddTransitions(AddTransitionsRequest) returns (AddTransitionsResponse);
+  rpc ForwardEvent(ForwardEventRequest) returns (ForwardEventResponse);
+  // ForwardEvents carries the forwarded events of a node to another one over one stream, in batches
+  rpc ForwardEvents(stream ForwardCalls) returns (stream ForwardReplies);
+  // Attach connects a client node (WithClientMode) to a raft member, which keeps it up to date
+  rpc Attach(stream AttachRequest) returns (stream AttachUpdate);
+  rpc CheckLending(CheckLendingRequest) returns (CheckLendingResponse);
+  rpc Inspect(InspectRequest) returns (InspectResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream TraceEvent);
+}

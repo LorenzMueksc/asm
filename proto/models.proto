@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+package service;
+
+option go_package = "/service";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/any.proto";
+
+enum Operator {
+  AT_LEAST_ONE = 0;
+  ALL = 1;
+  NONE = 2;
+  ONE_OF = 3;
+}
+
+// Bits is a packed bitset. Bit i is stored in words[i / 64] at position i % 64.
+message Bits {
+  repeated uint64 words = 1;
+}
+
+message Transition {
+  string name = 1;
+  string event_name = 2;
+  // int32 since priorities may be negative; wire-compatible with the former uint32 for non-negative values.
+  int32 priority = 3;
+  bool saveOnChange = 4;
+  // node_id of the node owning the transition.
+  string node_id = 5;
+  message Condition {
+    message States {
+      repeated Bits states = 1;
+    }
+    // states per bitmap name
+    map<string, States> states = 1;
+    Operator operator = 2;
+  }
+  repeated Condition conditions = 6;
+  message Batching {
+    uint64 count = 1;
+    google.protobuf.Duration period = 2;
+  }
+  Batching batching = 7;
+  // signature identifies the behavior of the transition.
+  // Transitions with the same name must have the same signature.
+  string signature = 8;
+  message State {
+    string bitmap = 1;
+    Bits bits = 2;
+  }
+  // state is the target state of a state transition. Empty for func transitions.
+  State state = 9;
+  // root bitmap name of the entity the transition runs on. Transitions of another entity are remote on a node.
+  string entity = 10;
+}
+
+message Bitmap {
+  string name = 1;
+  message BitValue {
+    google.protobuf.Any value = 1;
+    // index of the bit in the bitset of the root entity bitmap
+    uint64 index = 2;
+  }
+  repeated BitValue values = 2;
+  map<string, Bitmap> children = 3;
+}
+
+enum NodeEventType {
+  NODE_EVENT_TYPE_UNSPECIFIED = 0;
+  BITMAP_ADD = 2;
+  LOCK_ACQUIRE = 6;
+  LOCK_RELEASE = 7;
+  NODE_HEARTBEAT = 8;
+  LOCK_CANCEL = 9;
+  LOCK_DONE = 10;
+  CLIENT_ADD = 11;
+  CLIENT_REMOVE = 12;
+  reserved 1, 3, 5;
+  reserved "TRANSITION_ADD", "TRANSITION_DEL", "BITMAP_DEL", "CONTAINER_EVENT";
+}
+
+message NodeLog {
+  string nodeId = 1;
+  NodeEventType type = 3;
+  google.protobuf.Timestamp ts = 6;
+  // the payload of the type: a Bitmap for BITMAP_ADD, a ContainerLock for LOCK_ACQUIRE, LOCK_RELEASE, LOCK_CANCEL
+  // and LOCK_DONE, a Heartbeat for NODE_HEARTBEAT, a ClientNode for CLIENT_ADD and CLIENT_REMOVE
+  oneof body {
+    Bitmap bitmap = 7;
+    ContainerLock lock = 8;
+    Heartbeat heartbeat = 9;
+    ClientNode client = 10;
+  }
+  reserved 2, 4, 5;
+  reserved "containerId", "meta", "payload";
+}
+
+// NodeLogs is the data of a raft log entry: log entries a node proposed together.
+message NodeLogs {
+  repeated NodeLog logs = 1;
+}
+
+// ContainerLock acquires, releases or cancels (a queued attempt) the lock of a container id for the node of the log.
+// LOCK_DONE ends a waited call which ran in the container of the lock.
+message ContainerLock {
+  string container_id = 1;
+  // token of the acquire, a release only applies with the current token
+  string token = 2;
+  // acquire of a waited call of another entity: the lock tokens of the containers waiting for the call.
+  // An acquire which would wait for one of them, directly or through other waiting containers, is refused.
+  repeated string wait_path = 3;
+  // acquire of a waited call: the token of the open container of this node the call joins, if the lock still has it
+  string join = 4;
+}
+
+// ClientNode is a node without raft (WithClientMode): it uses the lock table through a raft member.
+// CLIENT_ADD adds it to the peers of every node, CLIENT_REMOVE removes it like a removed raft member.
+message ClientNode {
+  uint64 id = 1;
+  string addr = 2;
+}
+
+// Heartbeat renews all locks of the node of the log.
+message Heartbeat {
+  // lease after which the locks of the node expire without a newer heartbeat
+  google.protobuf.Duration lease = 1;
+}
+
+// NodeSnapshot is the state the raft log builds, used to compact the log.
+message NodeSnapshot {
+  Bitmap layout = 1;
+  // listen addresses by node id
+  map<uint64, string> peers = 2;
+  message Lock {
+    string container_id = 1;
+    string holder = 2;
+    string token = 3;
+    message Waiter {
+      string node = 1;
+      string token = 2;
+      // lock tokens of the containers waiting for the waiter, empty if nobody does
+      repeated string wait_path = 3;
+    }
+    // nodes waiting for the lock, in the order they asked
+    repeated Waiter waiters = 4;
+    message Call {
+      string token = 1;
+      // lock tokens of the containers waiting for the call
+      repeated string wait_path = 2;
+    }
+    // waited calls running in the holder's container, or waiting for their turn there
+    repeated Call calls = 5;
+  }
+  repeated Lock locks = 3;
+  message Liveness {
+    google.protobuf.Timestamp last = 1;
+    google.protobuf.Duration lease = 2;
+  }
+  // liveness by node id
+  map<string, Liveness> nodes = 4;
+  // ids of the nodes removed from the cluster, their messages are rejected
+  repeated uint64 removed = 5;
+}
