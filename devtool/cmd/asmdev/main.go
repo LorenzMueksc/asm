@@ -13,8 +13,8 @@ import (
 	"os/signal"
 	"time"
 
+	asm "rumue.io/asm"
 	"rumue.io/asm/devtool"
-	asm "rumue.io/asm/v2"
 )
 
 func main() {

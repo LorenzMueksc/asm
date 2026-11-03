@@ -17,7 +17,7 @@ import (
 	"slices"
 	"strings"
 
-	asm "rumue.io/asm/v2"
+	asm "rumue.io/asm"
 )
 
 type role struct {

@@ -352,6 +352,7 @@ func (m *ForwardEventRequest) CloneVT() *ForwardEventRequest {
 	r.HandoverId = m.HandoverId
 	r.TargetId = m.TargetId
 	r.Redirected = m.Redirected
+	r.FailIfBusy = m.FailIfBusy
 	if rhs := m.Payloads; rhs != nil {
 		tmpContainer := make([]*anypb.Any, len(rhs))
 		for k, v := range rhs {
@@ -531,6 +532,13 @@ func (m *AttachUpdate) CloneVT() *AttachUpdate {
 			tmpContainer[k] = v.CloneVT()
 		}
 		r.Refused = tmpContainer
+	}
+	if rhs := m.Regions; rhs != nil {
+		tmpContainer := make(map[string]string, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v
+		}
+		r.Regions = tmpContainer
 	}
 	if len(m.unknownFields) > 0 {
 		r.unknownFields = make([]byte, len(m.unknownFields))
@@ -751,6 +759,7 @@ func (m *NodeInfo) CloneVT() *NodeInfo {
 	r.Entity = m.Entity
 	r.Client = m.Client
 	r.AttachedTo = m.AttachedTo
+	r.Region = m.Region
 	if rhs := m.Peers; rhs != nil {
 		tmpContainer := make(map[uint64]string, len(rhs))
 		for k, v := range rhs {
@@ -1452,6 +1461,9 @@ func (this *ForwardEventRequest) EqualVT(that *ForwardEventRequest) bool {
 	if this.Redirected != that.Redirected {
 		return false
 	}
+	if this.FailIfBusy != that.FailIfBusy {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -1692,6 +1704,18 @@ func (this *AttachUpdate) EqualVT(that *AttachUpdate) bool {
 	}
 	if this.Full != that.Full {
 		return false
+	}
+	if len(this.Regions) != len(that.Regions) {
+		return false
+	}
+	for i, vx := range this.Regions {
+		vy, ok := that.Regions[i]
+		if !ok {
+			return false
+		}
+		if vx != vy {
+			return false
+		}
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
@@ -2091,6 +2115,9 @@ func (this *NodeInfo) EqualVT(that *NodeInfo) bool {
 		return false
 	}
 	if this.AttachedTo != that.AttachedTo {
+		return false
+	}
+	if this.Region != that.Region {
 		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
@@ -3141,6 +3168,18 @@ func (m *ForwardEventRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.FailIfBusy {
+		i--
+		if m.FailIfBusy {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x80
+	}
 	if m.Redirected {
 		i--
 		if m.Redirected {
@@ -3516,6 +3555,25 @@ func (m *AttachUpdate) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Regions) > 0 {
+		for k := range m.Regions {
+			v := m.Regions[k]
+			baseI := i
+			i -= len(v)
+			copy(dAtA[i:], v)
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(v)))
+			i--
+			dAtA[i] = 0x12
+			i -= len(k)
+			copy(dAtA[i:], k)
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(k)))
+			i--
+			dAtA[i] = 0xa
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(baseI-i))
+			i--
+			dAtA[i] = 0x62
+		}
 	}
 	if m.Full {
 		i--
@@ -4168,6 +4226,15 @@ func (m *NodeInfo) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Region) > 0 {
+		i -= len(m.Region)
+		copy(dAtA[i:], m.Region)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Region)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0xa2
 	}
 	if len(m.AttachedTo) > 0 {
 		i -= len(m.AttachedTo)
@@ -5207,6 +5274,9 @@ func (m *ForwardEventRequest) SizeVT() (n int) {
 	if m.Redirected {
 		n += 2
 	}
+	if m.FailIfBusy {
+		n += 3
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -5365,6 +5435,14 @@ func (m *AttachUpdate) SizeVT() (n int) {
 	}
 	if m.Full {
 		n += 2
+	}
+	if len(m.Regions) > 0 {
+		for k, v := range m.Regions {
+			_ = k
+			_ = v
+			mapEntrySize := 1 + len(k) + protohelpers.SizeOfVarint(uint64(len(k))) + 1 + len(v) + protohelpers.SizeOfVarint(uint64(len(v)))
+			n += mapEntrySize + 1 + protohelpers.SizeOfVarint(uint64(mapEntrySize))
+		}
 	}
 	n += len(m.unknownFields)
 	return n
@@ -5639,6 +5717,10 @@ func (m *NodeInfo) SizeVT() (n int) {
 		n += 3
 	}
 	l = len(m.AttachedTo)
+	if l > 0 {
+		n += 2 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.Region)
 	if l > 0 {
 		n += 2 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
@@ -7755,6 +7837,26 @@ func (m *ForwardEventRequest) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.Redirected = bool(v != 0)
+		case 16:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field FailIfBusy", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.FailIfBusy = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -8891,6 +8993,133 @@ func (m *AttachUpdate) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.Full = bool(v != 0)
+		case 12:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Regions", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.Regions == nil {
+				m.Regions = make(map[string]string)
+			}
+			var mapkey string
+			var mapvalue string
+			for iNdEx < postIndex {
+				entryPreIndex := iNdEx
+				var wire uint64
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return protohelpers.ErrIntOverflow
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					wire |= uint64(b&0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				fieldNum := int32(wire >> 3)
+				if fieldNum == 1 {
+					var stringLenmapkey uint64
+					for shift := uint(0); ; shift += 7 {
+						if shift >= 64 {
+							return protohelpers.ErrIntOverflow
+						}
+						if iNdEx >= l {
+							return io.ErrUnexpectedEOF
+						}
+						b := dAtA[iNdEx]
+						iNdEx++
+						stringLenmapkey |= uint64(b&0x7F) << shift
+						if b < 0x80 {
+							break
+						}
+					}
+					intStringLenmapkey := int(stringLenmapkey)
+					if intStringLenmapkey < 0 {
+						return protohelpers.ErrInvalidLength
+					}
+					postStringIndexmapkey := iNdEx + intStringLenmapkey
+					if postStringIndexmapkey < 0 {
+						return protohelpers.ErrInvalidLength
+					}
+					if postStringIndexmapkey > l {
+						return io.ErrUnexpectedEOF
+					}
+					mapkey = string(dAtA[iNdEx:postStringIndexmapkey])
+					iNdEx = postStringIndexmapkey
+				} else if fieldNum == 2 {
+					var stringLenmapvalue uint64
+					for shift := uint(0); ; shift += 7 {
+						if shift >= 64 {
+							return protohelpers.ErrIntOverflow
+						}
+						if iNdEx >= l {
+							return io.ErrUnexpectedEOF
+						}
+						b := dAtA[iNdEx]
+						iNdEx++
+						stringLenmapvalue |= uint64(b&0x7F) << shift
+						if b < 0x80 {
+							break
+						}
+					}
+					intStringLenmapvalue := int(stringLenmapvalue)
+					if intStringLenmapvalue < 0 {
+						return protohelpers.ErrInvalidLength
+					}
+					postStringIndexmapvalue := iNdEx + intStringLenmapvalue
+					if postStringIndexmapvalue < 0 {
+						return protohelpers.ErrInvalidLength
+					}
+					if postStringIndexmapvalue > l {
+						return io.ErrUnexpectedEOF
+					}
+					mapvalue = string(dAtA[iNdEx:postStringIndexmapvalue])
+					iNdEx = postStringIndexmapvalue
+				} else {
+					iNdEx = entryPreIndex
+					skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+					if err != nil {
+						return err
+					}
+					if (skippy < 0) || (iNdEx+skippy) < 0 {
+						return protohelpers.ErrInvalidLength
+					}
+					if (iNdEx + skippy) > postIndex {
+						return io.ErrUnexpectedEOF
+					}
+					iNdEx += skippy
+				}
+			}
+			m.Regions[mapkey] = mapvalue
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -10845,6 +11074,38 @@ func (m *NodeInfo) UnmarshalVT(dAtA []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.AttachedTo = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 20:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Region", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Region = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

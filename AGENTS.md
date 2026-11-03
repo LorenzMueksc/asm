@@ -8,9 +8,9 @@ Router for AI agents. Read this, then only the docs the task needs (table below)
 - **[U]** Files: read and write only inside this project folder; ask before reading anything outside it. Temp files, logs, test binaries and backups go to `.scratch/` (gitignored), never to the system temp scratchpad. No agent memory outside the project: durable notes go into these docs. Tool caches are fine (Go build/module cache, `%TEMP%` dirs from `go test`, npm cache).
 - Not a git repo: copy affected files to `.scratch/backup-<topic>/` before moving/deleting files or large rewrites.
 - Style: functional options (`funcXxxOption`), ginkgo/gomega specs, comments on non-obvious logic.
-- After a change: update the topic doc(s), `docs/agents/codemap.md` if files/flows changed, `v2/README.md` if the public API/behavior changed, and add one line to the `plan.md` log. Details and measurements go to `docs/history/`, not into topic docs.
+- After a change: update the topic doc(s), `docs/agents/codemap.md` if files/flows changed, `README.md` if the public API/behavior changed, and add one line to the `plan.md` log. Details and measurements go to `docs/history/`, not into topic docs.
 - Doc markers: **[U]** decided by the user, don't change without asking. **[A]** agent's choice, may be revisited with the user.
-- Scope: `v2/` (package `asm`), `proto/`, `service/` (generated: never hand-edit), `devtool/`, `examples/`. v1 was deleted. The econsim demo is its own project `../econsim`, using `v2/` through `replace rumue.io/asm => ../asm`.
+- Scope: the module root (package `asm`, its `.go` files), `certs/`, `proto/`, `service/` (generated: never hand-edit), `devtool/`, `examples/`. v1 was deleted. The econsim demo is its own project `../econsim`, using the package through `replace rumue.io/asm => ../asm`.
 
 ## Env
 - Windows 11, Go 1.27, Git Bash or PowerShell. Searches skip `node_modules`/`dist` via `.ignore`.
@@ -19,12 +19,12 @@ Router for AI agents. Read this, then only the docs the task needs (table below)
 
 ## Commands
 ```
-go build ./... && go vet ./v2/   # vet: "struct field unexported has json tag" in bitmaps_test.go is known
-go test ./v2/ -ginkgo.label-filter='!cluster'            # fast specs, seconds
-go test ./v2/ -ginkgo.focus "<spec text>" -ginkgo.no-color
-go test -count=1 ./v2/                                   # all, ~6 min (cluster specs = real raft on localhost)
-CGO_ENABLED=1 go test -race -count=1 -timeout 30m ./v2/  # ~6 min
-go test ./v2/ -run '^$' -bench . -benchtime 2s           # v2/bench_test.go
+go build ./... && go vet .      # vet: "struct field unexported has json tag" in bitmaps_test.go is known
+go test . -ginkgo.label-filter='!cluster'            # fast specs, seconds
+go test . -ginkgo.focus "<spec text>" -ginkgo.no-color
+go test -count=1 .                                   # all, ~8 min (cluster specs = real raft on localhost)
+CGO_ENABLED=1 go test -race -count=1 -timeout 30m .  # ~8 min
+go test . -run '^$' -bench . -benchtime 2s           # bench_test.go
 cd devtool/web && npm run build                          # before go build of devtool (embeds web/dist)
 # protos (repo root):
 P=/c/Users/loren/AppData/Local/Microsoft/WinGet/Packages/Google.Protobuf_Microsoft.Winget.Source_8wekyb3d8bbwe
@@ -33,7 +33,7 @@ P=/c/Users/loren/AppData/Local/Microsoft/WinGet/Packages/Google.Protobuf_Microso
   --go-vtproto_out=service --go-vtproto_opt=paths=source_relative,features=marshal+unmarshal+size+clone+equal \
   proto/models.proto proto/services.proto
 ```
-Module `rumue.io/asm`; packages `.../v2` (name `asm`), `.../v2/certs`, `.../service` (generated), `.../devtool`.
+Module `rumue.io/asm`; packages `rumue.io/asm` (name `asm`, module root), `.../certs`, `.../service` (generated), `.../devtool`.
 
 ## Docs (read on demand)
 | Task touches | Read |
@@ -49,7 +49,7 @@ Module `rumue.io/asm`; packages `.../v2` (name `asm`), `.../v2/certs`, `.../serv
 | specs, test harness, benchmarks, current numbers | `docs/agents/testing.md` |
 | demo `examples/gamemeta` | `docs/agents/demo.md` |
 | wire schema | `proto/models.proto`, `proto/services.proto` |
-| user-facing docs | `v2/README.md`, `devtool/README.md`, `examples/gamemeta/README.md` |
+| user-facing docs | `README.md`, `devtool/README.md`, `examples/gamemeta/README.md` |
 | open work, change log | `plan.md` (history: `docs/history/`) |
 | decisions waiting for the user | `docs/questionnaire.md` (add questions there when the user is away) |
 
@@ -58,5 +58,5 @@ Module `rumue.io/asm`; packages `.../v2` (name `asm`), `.../v2/certs`, `.../serv
 - State = `Bits` per root entity bitmap; merged per property; entity bits win over event bits.
 - Transitions: state or func, highest priority first. Func transitions owned by other nodes are remote: the event is forwarded and the receiver decides what runs.
 - **[U]** Design model: one container (one entity instance, eg. a player) lives on several nodes. Each node contributes the func transitions it owns, run as remote funcs. The lock is lent along waiting calls (lend chain), so the state moves to the node running the next step. Nodes of another entity type use those transitions only remotely, on the target's own lock. New designs (routing, locking, lifecycle) must fit this model.
-- Raft log: bitmaps, locks, heartbeats, client add/remove, conf changes; one `NodeLogs` batch per raft entry. Transitions sync by rpc.
+- Raft log: bitmaps, locks, heartbeats, client add/remove, regions, conf changes; one `NodeLogs` batch per raft entry. Transitions sync by rpc.
 - Node modes: raft member (default), client (`WithClientMode`: no raft, locks through a member), standalone (`WithSkipRaft`: no locks).

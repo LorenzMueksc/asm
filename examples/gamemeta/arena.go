@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
+	asm "rumue.io/asm"
 	"rumue.io/asm/examples/gamemeta/gamepb"
-	asm "rumue.io/asm/v2"
 )
 
 // The arena keeps the second entity of the cluster, Match. Its containers have match ids, while the events come from

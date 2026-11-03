@@ -1,6 +1,6 @@
 # Game meta services demo
 
-Seven asm v2 nodes run as separate processes and form a raft cluster on localhost. They handle the meta services of an online game: matchmaking, anti-cheat, the in-game store and progression (ranks, scores), for players connecting through two region gateways.
+Seven asm nodes run as separate processes and form a raft cluster on localhost. They handle the meta services of an online game: matchmaking, anti-cheat, the in-game store and progression (ranks, scores), for players connecting through two region gateways.
 
 ```
 go run ./examples/gamemeta                      # runs until ctrl+c

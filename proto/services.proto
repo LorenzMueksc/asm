@@ -115,6 +115,10 @@ message ForwardEventRequest {
   string target_id = 14;
   // the waited call was sent on to the node holding the target's lock: that node runs it, it doesn't send it on again
   bool redirected = 15;
+  // a waited call on the target's own lock (another entity, target_id) fails with ResourceExhausted instead of waiting
+  // while the target is busy: its lock is held by another node or others wait for it, or its container is working
+  // (Emit WithOnBusy(OnBusyFail))
+  bool fail_if_busy = 16;
 }
 
 // CheckLendingRequest asks the last lender of a lend chain whether it runs on the lent lock of the container.
@@ -165,10 +169,13 @@ message AttachUpdate {
   map<string, NodeSnapshot.Liveness> liveness = 8;
   // locks the client holds, waits for, calls into or watches, as they are now; a lock without holder is free
   repeated NodeSnapshot.Lock locks = 9;
-  // acquires of the client the lock table refused
+  // acquires of the client the lock table refused; busy set: refused because the lock was busy (fail_if_busy),
+  // else because waiting would deadlock
   repeated ContainerLock refused = 10;
   // the first update: locks are all locks of the client and its watches
   bool full = 11;
+  // regions by node id (NODE_REGION), with the membership
+  map<string, string> regions = 12;
 }
 
 // ForwardCalls is a batch of forwarded events a node sends over the ForwardEvents stream.
@@ -274,6 +281,8 @@ message NodeInfo {
   // the node is a client (WithClientMode): no raft, it uses the lock table through the member it is attached to
   bool client = 18;
   string attached_to = 19;
+  // the region of the node (WithRegion)
+  string region = 20;
 }
 
 message InspectTransition {

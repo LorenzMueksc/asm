@@ -15,8 +15,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/protobuf/proto"
+	asm "rumue.io/asm"
 	"rumue.io/asm/examples/gamemeta/gamepb"
-	asm "rumue.io/asm/v2"
 )
 
 type (

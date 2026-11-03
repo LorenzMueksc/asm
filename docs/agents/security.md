@@ -11,7 +11,8 @@ Code: `node_tls.go`, `certs/certs.go`. Decided [U]: mTLS with id + roles in the 
 - `syncTransitions` drops pulled transitions whose `node_id` isn't the peer asked (always).
 - Dialing (`dialOption(id)`): `InsecureSkipVerify` + `VerifyConnection` (chain to CA, server auth, identity, then the hook): peer must be the expected node id (member or client role); join/attach addresses (`id` 0) must be `member`. Host names not verified. Tools: `ToolCredentials(ca, cert)` accepts any member or client (no hook).
 - `WithPublicAddr(addr)`: second gRPC server with only `Event` (`publicServer`, rest `Unimplemented`), server TLS with the node cert if TLS is on, no client cert. Any mode (also `WithSkipRaft`). Stopped with the node.
-- Package `v2/certs` (tests, demo, dev): `NewCA`, `Issue(id, roles...)` (ECDSA P-256, server+client auth, SAN localhost/127.0.0.1), `TLSCertificate`, `WriteCA`, `WriteFiles`.
+- Package `certs/` (`rumue.io/asm/certs`) (tests, demo, dev): `NewCA`, `Issue(id, roles...)` (ECDSA P-256, server+client auth, SAN localhost/127.0.0.1), `TLSCertificate`, `WriteCA`, `WriteFiles`.
+- Regions [U 2026-10-31]: `certs.Region(path)` = OU value `region:<path>`; `identity.region()`; `checkOwnCertificate` takes it when `WithRegion` is empty, fails on a different one (`checkRegion`); `checkProposal` refuses a `NODE_REGION` other than the certificate's.
 
 ## Removal [U: complete; A: details]
 - A removed id is rejected for every rpc except `Join` [U, 2026-10-24: rejoin with an old id stays allowed, also with TLS]. A removed client still gets the membership update over its open `Attach`.

@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	asm "rumue.io/asm/v2"
-	"rumue.io/asm/v2/certs"
+	asm "rumue.io/asm"
+	"rumue.io/asm/certs"
 )
 
 const (

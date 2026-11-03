@@ -10,8 +10,8 @@ import (
 
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
+	asm "rumue.io/asm"
 	"rumue.io/asm/examples/gamemeta/gamepb"
-	asm "rumue.io/asm/v2"
 )
 
 // sharedPlayer plays on both gateways, so their sessions compete for the lock.
