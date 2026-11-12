@@ -189,6 +189,12 @@ A node has one entity type (`Node[T, K]`), but a cluster can mix nodes of differ
 - `Shutdown()`: closes all containers.
 - `Leave(ctx)`: closes all containers, waits until they are closed and leaves the cluster (see above). Work other nodes handed over and that didn't run yet goes back to them, they hand it to other owners.
 
+### Rounds (standalone nodes)
+
+Rounds make the messages between the containers of a node reproducible: within a round containers send each other deferred events, which the node delivers at the next round barrier in a sorted order, so what a container receives doesn't depend on how the goroutines were scheduled.
+
+- Deferred events: `c.Emit(ctx, event, payload, WithTarget(id), WithDeferred())` in a transition appends the event to the container's outbox and returns. Nothing is delivered before the node's next round barrier. Every event gets the next sequence number of the sender's outbox (0, 1, ... since the last barrier). The target is required and may be the sender itself; `WithWaitRemote`, `WithReply` and `WithDoneChannel` make `Emit` fail. `WithTarget` without `WithDeferred` keeps calling the target live.
+
 ### Hooks and options (node_opts.go)
 
 - Lifecycle hooks: `WithInitFunc` (runs once before the first event), `WithSaveFunc`, `WithCloseFunc`.

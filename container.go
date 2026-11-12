@@ -129,6 +129,10 @@ type (
 		status   containerStatus
 
 		logger *zap.Logger
+
+		// round is the container's part in the rounds of its node: outbox, inbox, round batches, spawns (outbox.go,
+		// round.go)
+		round containerRound[T, K]
 	}
 	containerEvent struct {
 		payload    interface{}
@@ -773,6 +777,7 @@ func (c *Container[T, K]) withTransition(ctx context.Context) context.Context {
 // With WithWaitRemote the transition waits for the receiving nodes: a container holding the lock lends it to them,
 // and a container running on a lent lock lends it on. Without it the work is handed over: the receiving nodes
 // get the lock once the node holding it released it.
+// With WithDeferred the event goes to the container's outbox for the next round barrier instead (Node.Round).
 // Called with another ctx it returns ErrNotInTransition.
 func (c *Container[T, K]) Emit(ctx context.Context, eventName string, event any, opts ...EventOption) error {
 	tc, ok := ctx.Value(transitionCtxKey{}).(transitionCtx)
@@ -786,6 +791,9 @@ func (c *Container[T, K]) Emit(ctx context.Context, eventName string, event any,
 	var eventOptions eventOptions
 	for _, opt := range opts {
 		opt.apply(&eventOptions)
+	}
+	if eventOptions.deferred {
+		return c.emitDeferred(eventName, event, &eventOptions)
 	}
 	evt := &containerEvent{
 		payload:    event,

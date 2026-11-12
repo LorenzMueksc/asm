@@ -99,6 +99,9 @@ type (
 		failErr atomic.Pointer[error]
 		errC    chan error
 
+		// rounds runs the round barriers of the containers' deferred events (outbox.go, round.go)
+		rounds nodeRounds[T, K]
+
 		nodeRaft
 	}
 	nodeContainerMap[T proto.Message, K Builder[T]] struct {
@@ -713,6 +716,7 @@ func (n *Node[T, K]) resetContainer(c *Container[T, K], p *containerProcessing, 
 	c.initOnce = sync.Once{}
 	// created on the first state (setState)
 	clear(c.states)
+	c.round.reset(&n.rounds)
 
 	if p == nil {
 		p = &containerProcessing{}

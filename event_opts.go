@@ -25,6 +25,8 @@ type (
 		replyF func(any)
 		// onBusy decides whether a waited call on a busy target waits or fails
 		onBusy OnBusy
+		// deferred queues the emitted event in the outbox until the next round barrier (WithDeferred, outbox.go)
+		deferred bool
 	}
 	// remoteExecution is set on the events a node receives from another node.
 	// The node runs its own func transitions matching the payloads, except the excluded ones.

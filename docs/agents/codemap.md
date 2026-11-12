@@ -48,6 +48,7 @@ Where things live and the main call flows. Grep the symbol names; line numbers c
 | node_inspect.go | rpc `Inspect` (node, transitions, layout, locks, containers; `limit`) |
 | node_trace.go | `eventTrace` ring buffer, `recordTrace`, `traceRefs`, rpc `WatchEvents` |
 | node_metrics.go | `nodeMetrics`, `histogram`, `collectMetrics`, `MetricsHandler`, `prometheusText` (1s cache), `serveMetrics` (HTTPS with TLS), `writePrometheus` |
+| outbox.go | rounds: `WithDeferred`, `envelope`, `containerRound` (`Container.round`), `nodeRounds` (`Node.rounds`, `mark`), `emitDeferred` (see rounds.md) |
 | logging.go, util.go | `debugf`, `containerLogger`, `raftLogger`; small helpers |
 | certs/certs.go | `NewCA`, `Issue`, `TLSCertificate`, `WriteCA`, `WriteFiles` |
 

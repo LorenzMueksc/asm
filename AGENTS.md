@@ -44,6 +44,7 @@ Module `rumue.io/asm`; packages `rumue.io/asm` (name `asm`, module root), `.../c
 | forwarding/routing, `ForwardEvents` stream, responses, other-entity receivers | `docs/agents/forwarding.md` |
 | raft, proposing, sending, snapshots, WAL/restart, startup, membership, client nodes | `docs/agents/cluster.md` |
 | container lifecycle, processing, `Emit`, Event rpc, errors, gotchas | `docs/agents/containers.md` |
+| rounds: deferred events, outbox, round barrier | `docs/agents/rounds.md` |
 | TLS, roles, authority, public listener | `docs/agents/security.md` |
 | dev tool, event trace, tracing, metrics | `docs/agents/observability.md` |
 | specs, test harness, benchmarks, current numbers | `docs/agents/testing.md` |
