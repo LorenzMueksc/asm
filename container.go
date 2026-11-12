@@ -655,6 +655,12 @@ func (c *Container[T, K]) processEventLocked(ctx context.Context, evt *container
 		})
 	}
 
+	// the round barrier sends the container its inbox to run (round.go)
+	if run, ok := evt.payload.(*roundRun); ok {
+		c.processRound(ctx, run)
+		return
+	}
+
 	// events forwarded by another node run the own func transitions of this node
 	if evt.remote != nil {
 		c.processRemote(ctx, evt)
@@ -1745,6 +1751,8 @@ func (c *Container[T, K]) save(ctx context.Context, source string) {
 
 // actionFailed reports the error of an action and collects it for the forwarded events the events belong to.
 func (c *Container[T, K]) actionFailed(err error, events []*containerEvent) {
+	// a round returns the first one (round.go)
+	c.round.failed(err)
 	seen := make([]*remoteExecution, 0, 1)
 	for _, evt := range events {
 		if evt.parent == nil || evt.parent.remote == nil || slices.Contains(seen, evt.parent.remote) {

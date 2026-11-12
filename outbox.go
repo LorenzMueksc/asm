@@ -34,6 +34,17 @@ type (
 		outbox []envelope
 		// marked is set while the container is in the node's list of containers the next barrier visits
 		marked atomic.Bool
+
+		// inbox holds the deferred events the barrier delivered to the container, in delivery order. The barrier fills
+		// it while no round runs, the container runs and empties it on its goroutine (processRound); the round event
+		// and the end of the round order the two.
+		inbox []envelope
+		// queued is set while the barrier lists the container as a target, only used by the barrier
+		queued bool
+		// running is set while the container runs a round, err holds the first error of its transitions meanwhile;
+		// both under the container's mu
+		running bool
+		err     error
 	}
 	// nodeRounds is the part of a node running rounds.
 	nodeRounds[T proto.Message, K Builder[T]] struct {
@@ -41,6 +52,15 @@ type (
 		mu sync.Mutex
 		// marked lists the containers the next barrier visits, each once: they have deferred events in their outbox
 		marked []*Container[T, K]
+
+		// sem (capacity 1) lets one round run at a time, created by the first round
+		sem     chan struct{}
+		semOnce sync.Once
+		// name is the name of the running round, nil between rounds
+		name atomic.Pointer[string]
+		// spare and targets are buffers of the barrier, reused by the next round
+		spare   []*Container[T, K]
+		targets []*Container[T, K]
 	}
 )
 

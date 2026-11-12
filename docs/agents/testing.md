@@ -23,6 +23,7 @@
 | node_reentrant_test | reentrant containers: events run while a transition waits (standalone), off per container, event filter (others deferred), call back, not busy while waiting; cluster: call back runs (filtered: refused), lent call blocks |
 | node_region_test | regions: nearness, cover order (nearest first, fewest among equal, unreachable → next), snapshot, certificate region; cluster: regions to members and a client through the log, forwards from member and client go to the near owner |
 | outbox_test | deferred events: outbox order and seq, marked once, nothing delivered, refused without target / with waiting options / outside a transition / without a node |
+| round_test | rounds: same inboxes in 5 runs of 200 containers × 20 rounds under contention (sorted per round), delivery in the next round (chain, self), waits for slow inboxes, unknown/closed target, lowest-id error + error func, one round at a time and ctx; `BenchmarkRound` (10k containers: empty round, one event each) |
 | node_grpc_test | Event rpc |
 | node_codec_test | vtCodec: generated code, pooled buffers, proto fallback |
 | node_locks_test | lock table: queue, re-acquire, cancel, expiry, removal, deadlock check |
