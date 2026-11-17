@@ -17,7 +17,7 @@ Code: `node_raft.go`, `node_propose.go`, `node_send.go`, `node_snapshot.go`, `no
 
 ## Snapshots
 - `maybeSnapshot` after each Ready: after `snapshotCount` entries (default 10000, keep 5000 catch-up) and ≥ `snapshotInterval` (default 30s, 0 = none) since the last, or once 64 MB applied since. Applying only copies the state (`copySnapshotState`: `maps.Clone` of the lock table, liveness, peers; locks and layout are replaced as a whole on every change) and sets the counters; a goroutine (`writeSnapshot`, one at a time: `snapshotting`) marshals (`MarshalVT`), `CreateSnapshot(index, confState, data)` (`ErrSnapOutOfDate` after a received snapshot: dropped), writes the file, `Compact(index - catchUp)`. With a wal it counts in `storageWG`. Metrics `asm_raft_snapshots_total`, `asm_raft_snapshot_bytes`, `asm_raft_snapshot_seconds`.
-- `NodeSnapshot`: layout, peers, removed, locks (queues, calls), liveness. `restoreSnapshot` (on `rd.Snapshot`) replaces peers + removed set, detaches clients. Senders report `MsgSnap` results.
+- `NodeSnapshot`: layout, peers, removed, locks (queues, calls with their read flag), liveness. `restoreSnapshot` (on `rd.Snapshot`) replaces peers + removed set, detaches clients. Senders report `MsgSnap` results.
 
 ## Persistence `WithDataDir` [U: own WAL files; A: details]
 - `<dir>/wal/<seq>.wal`: records `[len][crc32c][type][data]` (entry, hard state, snapshot marker, join index); `<dir>/snap/<term>-<index>.snap` = `[crc32c][raftpb.Snapshot]` (tmp, sync, rename). Without data dir: memory only.

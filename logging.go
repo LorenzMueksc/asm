@@ -56,3 +56,9 @@ func (r *raftLogger) Fatal(v ...any)                   { r.s.Fatal(v...) }
 func (r *raftLogger) Fatalf(format string, v ...any)   { r.s.Fatalf(format, v...) }
 func (r *raftLogger) Panic(v ...any)                   { r.s.Panic(v...) }
 func (r *raftLogger) Panicf(format string, v ...any)   { r.s.Panicf(format, v...) }
+
+// debugOn reports whether the logger logs debug messages. Hot paths check it before debugf: the arguments of debugf
+// are allocated even when nothing is logged.
+func debugOn(l *zap.Logger) bool {
+	return l.Core().Enabled(zapcore.DebugLevel)
+}

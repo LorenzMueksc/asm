@@ -119,6 +119,8 @@ func (n *Node[T, K]) enqueueForwardedLocked(id string, item forwardedExecution) 
 		n.forwarded.queues[id] = q
 	}
 	q.items = append(q.items, item)
+	// it runs on its own until it ran or was given up: a round ending meanwhile fails with ErrRoundOverlap
+	n.rounds.runsOn(1)
 
 	if !q.running {
 		q.running = true
@@ -191,6 +193,7 @@ func (n *Node[T, K]) failHandOver(h *acceptedHandOver, err error) bool {
 // giveUpForwarded gives up an execution which can't run on this node: its hand-over is failed back to the senders,
 // errors without a gRPC code as Unavailable, so they hand it to another owner. Without a sender to tell it is dropped.
 func (n *Node[T, K]) giveUpForwarded(id string, item forwardedExecution, err error) {
+	defer n.rounds.runsOn(-1)
 	if c := status.Code(err); c == codes.Unknown || c == codes.OK {
 		err = status.Errorf(codes.Unavailable, "node %s can't run events %s of container %s: %v", n.Id(), item.eventName, id, err)
 	}
@@ -251,6 +254,7 @@ func (n *Node[T, K]) drainForwarded(id string, q *forwardQueue) {
 
 		go func() {
 			<-doneC
+			defer n.rounds.runsOn(-1)
 			if item.r.err != nil {
 				n.logger.Error(fmt.Sprintf("forwarded events %s of container %s failed: %+v", item.eventName, id, item.r.err))
 			}

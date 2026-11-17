@@ -5,7 +5,7 @@ Code: `node_inspect.go`, `node_trace.go`, `node_metrics.go`, `devtool/`.
 ## Introspection [U: gRPC + standalone tool, read-only]
 - `Inspect`: node info, transitions, layout, locks, containers (busy ones from their snapshot). `InspectRequest.limit` caps locks/containers (sorted by id, `firstIds`); `lock_count`/`container_count` = totals.
 - Event trace opt-in `WithEventTrace(n)`: containers get `traceF` only then; the hot path collects names/snapshots only if `traceF != nil`. Entries: EVENT (end of `processEvent`), RECEIVED (end of `processRemote`), FORWARD (`Node.forward`, with routes), ERROR (`reportError` on `run`), CONTAINER_STARTED/CLOSED (`openContainer`/`removeF`).
-- With trace on, containers store a snapshot (`storeSnapshot`: entity clone, states, batch sizes; fakes without proto reflection encoded at once) at start and end of processing; `Inspect` encodes it for busy containers (`c.mu.TryLock` fails).
+- With trace on, containers store a snapshot (`storeSnapshot`: entity clone (immutable mode: the entity itself), states, batch sizes; fakes without proto reflection encoded at once) at start and end of processing; `Inspect` encodes it for busy containers (`c.mu.TryLock` fails).
 - `WatchEvents`: subscribe before reading the buffer; a watcher whose `after_seq` is ahead (node restarted) gets everything.
 
 ## Tracing [U: follow one event, search + filters; no sampling, no OpenTelemetry]
@@ -15,7 +15,7 @@ Code: `node_inspect.go`, `node_trace.go`, `node_metrics.go`, `devtool/`.
 - Action errors carry their events' traces (`sendTracedError`, `queuedError`); ERROR entry is a span of them.
 
 ## Metrics [U: Inspect + Prometheus]
-- `nodeMetrics`: counters + latency histograms (`histogram`, `histogramBounds` 100µs-30s) via atomics on hot paths (propose, apply, send, acquire/release, open, processEvent via `Container.metrics`, forward, WAL sync). Gauges in `collectMetrics` (raft indexes, locks, containers, queued hand-overs, `asm_handover_lock_waits`, `asm_handovers_kept`, runtime).
+- `nodeMetrics`: counters + latency histograms (`histogram`, `histogramBounds` 100µs-30s) via atomics on hot paths (propose, apply, send, acquire/release, open, processEvent via `Container.metrics`, forward, WAL sync, entity copies: `asm_entity_copies_total` from `countCopy` [U 2026-11-12, Q33 b], see `containers.md`). Gauges in `collectMetrics` (raft indexes, locks, containers, queued hand-overs, `asm_handover_lock_waits`, `asm_handovers_kept`, runtime).
 - `Inspect` returns them (`Metric`: counter/gauge/histogram), always freshly collected. `WithMetricsAddr(addr)` serves `/metrics` (Prometheus text, hand-written `writePrometheus`). [U] With `WithTLS`: HTTPS with the node cert, client cert of the CA with role observer or admin (`authorizeHTTP`, see `security.md`); without TLS plain HTTP.
 - `MetricsHandler()` [U]: same output, no auth, for own HTTP servers. [A] Output cached `metricsCacheTTL` 1s (`prometheusText`, `nodeMetrics.text`; concurrent scrapes wait for one collection), so scrapes don't each lock the lock table/containers and call raft `Status()`. Inspect not cached.
 

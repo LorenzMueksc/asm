@@ -26,6 +26,9 @@ type (
 		regions regions
 		// reentrant is the default reentrance of the containers (WithReentrant), nil if they aren't
 		reentrant *reentrance
+		// containerModes are the container options of the entity mode and the reader cap (WithImmutableEntities,
+		// WithMaxReadersPerContainer), added to the hooks
+		containerModes []ContainerOption
 		// keepAlive is how long a container's goroutine waits for more work (WithContainerKeepAlive)
 		keepAlive time.Duration
 
@@ -386,6 +389,7 @@ func (n *Node[T, K]) withNodeHooks(opts []ContainerOption) []ContainerOption {
 		if r := n.reentrant; r != nil {
 			n.hooks = append(n.hooks, WithContainerReentrant(r.events...))
 		}
+		n.hooks = append(n.hooks, n.containerModes...)
 		n.hookOptions = applyContainerOptions(n.hooks)
 	})
 	if len(opts) == 0 {
@@ -422,26 +426,29 @@ func (n *Node[T, K]) callContainer(ctx context.Context, id string, waitPath []st
 		return err
 	}
 
+	// cleared once a call joined as a read didn't run as one: it is called again as a writer
+	readable := true
 	for {
 		if n.leaving.Load() {
 			return ErrNodeStopped
 		}
 
 		// an open container holding its own lock may be busy with work waiting for the caller, it is joined
-		// through the lock table
+		// through the lock table; a call of a read event runs next to its writer (read)
 		join := ""
-		busy := false
+		busy, read := false, false
 		n.containerMap.mu.RLock()
 		if c, ok := n.containerMap.m[id]; ok && c.lockToken != "" && c.isAccepting() {
 			join = c.lockToken
 			busy = failIfBusy && c.busy(c.reentrant, eventName)
+			read = readable && c.readsCall(eventName)
 		}
 		n.containerMap.mu.RUnlock()
 		if busy {
 			return n.refuseBusy(id)
 		}
 
-		token, joined, err := n.acquireLock(ctx, id, waitPath, join, failIfBusy)
+		token, joined, err := n.acquireLock(ctx, id, waitPath, join, failIfBusy, read)
 		if err != nil {
 			return err
 		}
@@ -465,12 +472,22 @@ func (n *Node[T, K]) callContainer(ctx context.Context, id string, waitPath []st
 		err = ErrContainerClosed
 		if c != nil {
 			// the container closes once idle, unless a StartContainer caller holds it (requestCallClose)
-			err = c.Event(eventName, nil, append(slices.Clip(opts), WithDoneChannel(doneC), withCloseAfter())...)
+			callOpts := append(slices.Clip(opts), WithDoneChannel(doneC), withCloseAfter())
+			if joined && read {
+				callOpts = append(callOpts, withReadCall())
+			}
+			err = c.Event(eventName, nil, callOpts...)
 		}
 		if err == nil {
 			err = waitDone(ctx, doneC)
 			n.lockDone(id, token, joined)
 			return err
+		}
+		if errors.Is(err, errNotRead) {
+			// the lock table didn't check it for deadlocks: called again as a writer
+			n.lockDone(id, token, joined)
+			readable = false
+			continue
 		}
 		if !joined || !errors.Is(err, ErrContainerClosed) {
 			n.lockDone(id, token, joined)
@@ -554,7 +571,7 @@ func (n *Node[T, K]) createContainer(ctx context.Context, id string, opts []Cont
 	if token, ok := n.reuseRetained(id); ok {
 		return n.openContainer(ctx, id, token, false, false, opts)
 	}
-	token, _, err := n.acquireLock(ctx, id, nil, "", false)
+	token, _, err := n.acquireLock(ctx, id, nil, "", false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -711,12 +728,15 @@ func (n *Node[T, K]) resetContainer(c *Container[T, K], p *containerProcessing, 
 
 	c.id = id
 	c.builder = n.createBuilderF()
+	c.rw.newBuilderF = n.createBuilderF
+	c.rw.setMode(&containerOpts)
 	c.status = containerStatusRunning
 
 	c.initOnce = sync.Once{}
 	// created on the first state (setState)
 	clear(c.states)
 	c.round.reset(&n.rounds)
+	c.setSpawnEntity(containerOpts.spawnEntity)
 
 	if p == nil {
 		p = &containerProcessing{}
@@ -964,6 +984,7 @@ func NewNode[T proto.Message, K Builder[T]](
 		n.keepAlive = max(*nodeSetupOptions.keepAlive, 0)
 	}
 	n.reentrant = nodeSetupOptions.reentrant
+	n.containerModes = nodeSetupOptions.containerModes
 	n.region = normalizeRegion(nodeSetupOptions.region)
 	n.stopC = make(chan struct{})
 	if nodeSetupOptions.stopC != nil {

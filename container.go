@@ -112,8 +112,12 @@ type (
 		ctx          context.Context
 		stopCtxWatch func() bool
 		closedF      func()
+		// txCtx is the ctx of the func transitions run on ctx (withTransition), made once per life
+		txCtx *transitionContext
 		// keepAlive is how long the running goroutine waits for more work before it ends (WithContainerKeepAlive)
 		keepAlive time.Duration
+		// keepAliveTimer is the keep-alive timer of the goroutines (run), stopped while none runs
+		keepAliveTimer *time.Timer
 		// callEvents are the events the running func transition executes, for the wait path of events it emits
 		callEvents []*containerEvent
 		// snapshot holds the entity, states and batches when processing of the current event started and after it,
@@ -122,6 +126,8 @@ type (
 		// routing caches the routing transitions by event name for the transitions in routingFor
 		routing    map[string]*Transition
 		routingFor *publishedTransitions
+		// rw holds what readers need (read-only transitions, rwmode.go)
+		rw rwContainer[T, K]
 
 		// mu serializes the processing of events and the execution of batch timers
 		mu       sync.Mutex
@@ -137,7 +143,6 @@ type (
 	containerEvent struct {
 		payload    interface{}
 		name       string
-		opts       []EventOption
 		doneC      chan<- struct{}
 		waitRemote bool
 		// failIfBusy: waited calls on another container's own lock fail with ErrBusy instead of waiting (WithOnBusy)
@@ -159,6 +164,8 @@ type (
 		// refs counts the processing pass and every batch still holding the event.
 		// The done channel is signaled once it drops to zero.
 		refs int
+		// single backs the slice of the event alone a transition runs with (one)
+		single [1]*containerEvent
 	}
 	// emitCall collects the errors and replies of the waited forwards of an emitted event while Emit runs. A batched
 	// event forwarded after Emit returned reports its errors to the error func as before.
@@ -175,6 +182,8 @@ type (
 		eventsC chan *containerEvent
 		// runner runs the container (Container.run), started by schedule while work is queued
 		runner interface{ run() }
+		// runF is runner.run as a func value, made once: a goroutine starts without allocating a closure
+		runF func()
 		// wakeC (capacity 1) wakes a running goroutine waiting for more work (keep-alive): queued errors, the close
 		// signal, a batch timer leaving a closing container idle. Events arrive through eventsC.
 		wakeC chan struct{}
@@ -213,6 +222,9 @@ type (
 		// doneC is closed once the container closed; it is created when the first one waits for it (done)
 		doneC  chan struct{}
 		closed bool
+
+		// pub is the entity published to readers (rwmode.go)
+		pub rwPublish
 	}
 	transitionQueue struct {
 		t      *Transition
@@ -274,7 +286,7 @@ func (p *containerProcessing) scheduleEvent() {
 	}
 	p.running = true
 	p.lifecycleMu.Unlock()
-	go p.runner.run()
+	go p.runF()
 }
 
 // schedule starts a goroutine running the container, unless the container closed or wasn't started yet; a running
@@ -297,7 +309,7 @@ func (p *containerProcessing) schedule() {
 	}
 	p.running = true
 	p.lifecycleMu.Unlock()
-	go p.runner.run()
+	go p.runF()
 }
 
 // hasWork reports whether work is queued: events, errors, or an idle container to close.
@@ -316,16 +328,49 @@ func (p *containerProcessing) hasWorkLocked() bool {
 	return len(p.errs) > 0
 }
 
-// stopRunning ends the running goroutine if no work is queued.
-func (p *containerProcessing) stopRunning() bool {
+// stopRunning ends the running goroutine if no work is queued, stopping its armed keep-alive timer (nil: none) first.
+func (p *containerProcessing) stopRunning(keepAlive *time.Timer) bool {
 	p.lifecycleMu.Lock()
 	defer p.lifecycleMu.Unlock()
 
 	if p.hasWorkLocked() {
 		return false
 	}
+	// the next goroutine finds the keep-alive timer stopped
+	if keepAlive != nil {
+		keepAlive.Stop()
+	}
 	p.running = false
 	return true
+}
+
+// claimRun lets the caller run the container in place of its goroutine for one event (a round, runRound), if no
+// goroutine runs it, it accepts events and nothing waits in its mailbox. It counts the event like addPending, the
+// caller processes it and calls releaseRun.
+func (p *containerProcessing) claimRun() bool {
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+
+	if p.running || p.closed || p.runner == nil || !p.accepting || len(p.eventsC) > 0 || len(p.deferred) > 0 {
+		return false
+	}
+	p.running = true
+	p.pending++
+	p.events++
+	return true
+}
+
+// releaseRun ends a run taken with claimRun: a goroutine takes over the work which came meanwhile (events, errors, the
+// close signal).
+func (p *containerProcessing) releaseRun() {
+	p.lifecycleMu.Lock()
+	if !p.hasWorkLocked() {
+		p.running = false
+		p.lifecycleMu.Unlock()
+		return
+	}
+	p.lifecycleMu.Unlock()
+	go p.runF()
 }
 
 // done returns a channel which is closed once the container closed.
@@ -498,7 +543,7 @@ func (c *Container[T, K]) start(ctx context.Context, closedF func()) {
 	c.ctx, c.closedF = context.WithValue(ctx, closeRequestKey{}, p), closedF
 	c.stopCtxWatch = context.AfterFunc(ctx, p.requestClose)
 	p.lifecycleMu.Lock()
-	p.runner = c
+	p.runner, p.runF = c, c.run
 	p.lifecycleMu.Unlock()
 	// work queued before
 	p.schedule()
@@ -510,16 +555,16 @@ func (c *Container[T, K]) start(ctx context.Context, closedF func()) {
 func (c *Container[T, K]) run() {
 	p := c.containerProcessing
 	// the keep-alive timer runs from the first wait on and isn't reset per event: when it fires after work came
-	// meanwhile, it is armed again for the rest of the keep-alive
-	var keepAlive *time.Timer
+	// meanwhile, it is armed again for the rest of the keep-alive. It is the container's, made by the first goroutine
+	// and stopped when one ends (stopRunning): the goroutines of later bursts of work reuse it.
+	keepAlive, armed := c.keepAliveTimer, false
 	lastWork := time.Now()
-	defer func() {
-		if keepAlive != nil {
-			keepAlive.Stop()
-		}
-	}()
+	// round: the last event was a round event (round.go). The next work of a round comes with the next round: the
+	// goroutine ends at once instead of waiting for it, which costs a timer per container and round.
+	round := false
 	for {
 		if evt := p.takeEvent(); evt != nil {
+			_, round = evt.payload.(*roundRun)
 			c.processEvent(c.ctx, evt)
 			lastWork = time.Now()
 		}
@@ -528,6 +573,9 @@ func (c *Container[T, K]) run() {
 		}
 
 		if p.stopAccepting() {
+			if armed {
+				keepAlive.Stop()
+			}
 			c.closeIdle(c.ctx, p)
 			c.stopCtxWatch()
 			if c.closedF != nil {
@@ -535,25 +583,38 @@ func (c *Container[T, K]) run() {
 			}
 			return
 		}
-		if c.keepAlive > 0 && !p.hasWork() {
-			if keepAlive == nil {
-				keepAlive = time.NewTimer(c.keepAlive)
+		if c.keepAlive > 0 && !round && !p.hasWork() {
+			if !armed {
+				if keepAlive == nil {
+					keepAlive = time.NewTimer(c.keepAlive)
+					c.keepAliveTimer = keepAlive
+				} else {
+					keepAlive.Reset(c.keepAlive)
+				}
+				armed = true
 			}
 			select {
 			case evt := <-p.eventsC:
+				_, round = evt.payload.(*roundRun)
 				c.processEvent(c.ctx, evt)
 				lastWork = time.Now()
 				continue
 			case <-p.wakeC:
 				continue
 			case <-keepAlive.C:
+				armed = false
 				if rest := c.keepAlive - time.Since(lastWork); rest > 0 {
 					keepAlive.Reset(rest)
+					armed = true
 					continue
 				}
 			}
 		}
-		if p.stopRunning() {
+		var stop *time.Timer
+		if armed {
+			stop = keepAlive
+		}
+		if p.stopRunning(stop) {
 			return
 		}
 	}
@@ -578,9 +639,9 @@ func (c *Container[T, K]) handleError(ctx context.Context, p *containerProcessin
 		return
 	}
 
-	c.mu.Lock()
+	c.lockWrite()
 	closeErr := c.errorF(ctx, c, err)
-	c.mu.Unlock()
+	c.unlockWrite()
 
 	if closeErr != nil {
 		c.logger.Info(fmt.Sprintf("error func returned an error, closing container: %+v", closeErr))
@@ -621,14 +682,20 @@ func (c *Container[T, K]) closeIdle(ctx context.Context, p *containerProcessing)
 }
 
 func (c *Container[T, K]) processEvent(ctx context.Context, evt *containerEvent) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lockWrite()
+	defer c.unlockWrite()
 	c.processEventLocked(ctx, evt)
 }
 
 // processEventLocked is processEvent for a caller holding mu: the run loop, or a transition waiting in a reentrant
 // container (waitServing).
 func (c *Container[T, K]) processEventLocked(ctx context.Context, evt *containerEvent) {
+	// the round barrier sends the container its inbox to run (round.go)
+	if run, ok := evt.payload.(*roundRun); ok {
+		c.processRoundEvent(ctx, run)
+		return
+	}
+
 	if m := c.metrics; m != nil {
 		start := time.Now()
 		defer func() {
@@ -642,8 +709,34 @@ func (c *Container[T, K]) processEventLocked(ctx context.Context, evt *container
 	evt.refs = 1
 	defer c.releaseEvent(evt)
 
-	debugf(c.logger, "received event %s", evt.name)
+	if debugOn(c.logger) {
+		debugf(c.logger, "received event %s", evt.name)
+	}
 
+	c.initFirst(ctx)
+
+	// a live event run while a transition of a round waits (reentrant) isn't part of the round (RoundOf, MessageOf)
+	if cr := &c.round; cr.run.Load() != nil {
+		run, current, msg := cr.run.Load(), cr.current, cr.currentMsg
+		cr.run.Store(nil)
+		cr.current, cr.currentMsg = nil, nil
+		defer func() {
+			cr.run.Store(run)
+			cr.current, cr.currentMsg = current, msg
+		}()
+	}
+
+	// events forwarded by another node run the own func transitions of this node
+	if evt.remote != nil {
+		c.processRemote(ctx, evt)
+		return
+	}
+
+	c.runEvent(ctx, evt)
+}
+
+// initFirst runs the init func before the first event of the container. The caller holds mu.
+func (c *Container[T, K]) initFirst(ctx context.Context) {
 	if c.initF != nil {
 		c.initOnce.Do(func() {
 			c.logger.Debug("executing container init func")
@@ -654,20 +747,7 @@ func (c *Container[T, K]) processEventLocked(ctx context.Context, evt *container
 			}
 		})
 	}
-
-	// the round barrier sends the container its inbox to run (round.go)
-	if run, ok := evt.payload.(*roundRun); ok {
-		c.processRound(ctx, run)
-		return
-	}
-
-	// events forwarded by another node run the own func transitions of this node
-	if evt.remote != nil {
-		c.processRemote(ctx, evt)
-		return
-	}
-
-	c.runEvent(ctx, evt)
+	c.initDone()
 }
 
 // runEvent runs the transitions of an event: the own ones in priority order, remote ones are routed at their place.
@@ -716,7 +796,9 @@ func (c *Container[T, K]) runEvent(ctx context.Context, evt *containerEvent) {
 		if !c.matches(t, evt.name) {
 			continue
 		}
-		debugf(c.logger, "transition %s matches conditions", t.Name)
+		if debugOn(c.logger) {
+			debugf(c.logger, "transition %s matches conditions", t.Name)
+		}
 
 		if c.traceF != nil {
 			ran = append(ran, t.Name)
@@ -755,6 +837,16 @@ func (evt *containerEvent) spanOrParent() string {
 	return evt.trace.GetParentSpanId()
 }
 
+// one returns the event alone as a slice, backed by the event itself: no allocation per transition run.
+func (evt *containerEvent) one() []*containerEvent {
+	evt.single[0] = evt
+	return evt.single[:]
+}
+
+func payloadOf(evt *containerEvent) any {
+	return evt.payload
+}
+
 // ErrNotInTransition is returned by Emit when it isn't called with the ctx of a transition of the container.
 var ErrNotInTransition = errors.New("emit is only possible with the ctx of a transition of the container")
 
@@ -763,19 +855,43 @@ const maxEmitDepth = 16
 
 type (
 	transitionCtxKey struct{}
-	// transitionCtx marks the ctx a container passes to its func transitions
+	// transitionCtx marks the ctx a container passes to its func transitions, as the *transitionCtx value of
+	// transitionCtxKey
 	transitionCtx struct {
 		container any
 		depth     int
 	}
+	// transitionContext is the ctx of the func transitions of events a container runs on its own ctx (its mailbox,
+	// rounds): one per container life instead of a context.WithValue per transition (withTransition)
+	transitionContext struct {
+		context.Context
+		tc transitionCtx
+	}
 )
 
-// withTransition marks the ctx of a func transition of the container, keeping the depth of an emitted event.
+// Value returns the transitionCtx for transitionCtxKey, else the value of the container's ctx.
+func (t *transitionContext) Value(key any) any {
+	if _, ok := key.(transitionCtxKey); ok {
+		return &t.tc
+	}
+	return t.Context.Value(key)
+}
+
+// withTransition marks the ctx of a func transition of the container, keeping the depth of an emitted event. The
+// caller holds mu.
 func (c *Container[T, K]) withTransition(ctx context.Context) context.Context {
-	if tc, ok := ctx.Value(transitionCtxKey{}).(transitionCtx); ok && tc.container == any(c) {
+	// the container's own ctx (checked first: a lookup walks the whole ctx chain) carries no transition of it
+	if ctx == c.ctx && ctx != nil {
+		if t := c.txCtx; t != nil && t.Context == ctx {
+			return t
+		}
+		c.txCtx = &transitionContext{Context: ctx, tc: transitionCtx{container: c}}
+		return c.txCtx
+	}
+	if tc, ok := ctx.Value(transitionCtxKey{}).(*transitionCtx); ok && tc.container == any(c) {
 		return ctx
 	}
-	return context.WithValue(ctx, transitionCtxKey{}, transitionCtx{container: c})
+	return context.WithValue(ctx, transitionCtxKey{}, &transitionCtx{container: c})
 }
 
 // Emit processes an event as part of the transition calling it, with the ctx the transition got.
@@ -786,7 +902,7 @@ func (c *Container[T, K]) withTransition(ctx context.Context) context.Context {
 // With WithDeferred the event goes to the container's outbox for the next round barrier instead (Node.Round).
 // Called with another ctx it returns ErrNotInTransition.
 func (c *Container[T, K]) Emit(ctx context.Context, eventName string, event any, opts ...EventOption) error {
-	tc, ok := ctx.Value(transitionCtxKey{}).(transitionCtx)
+	tc, ok := ctx.Value(transitionCtxKey{}).(*transitionCtx)
 	if !ok || tc.container != any(c) {
 		return ErrNotInTransition
 	}
@@ -795,16 +911,19 @@ func (c *Container[T, K]) Emit(ctx context.Context, eventName string, event any,
 	}
 
 	var eventOptions eventOptions
-	for _, opt := range opts {
-		opt.apply(&eventOptions)
-	}
+	applyEventOptions(&eventOptions, opts)
+	// a deferred event goes to the outbox; a reader emits only read events to itself (rwmode.go)
 	if eventOptions.deferred {
 		return c.emitDeferred(eventName, event, &eventOptions)
+	}
+	if eventOptions.target == "" {
+		if err := c.checkReadOnlyEmit(eventName); err != nil {
+			return err
+		}
 	}
 	evt := &containerEvent{
 		payload:    event,
 		name:       eventName,
-		opts:       opts,
 		doneC:      eventOptions.doneC,
 		waitRemote: eventOptions.waitRemote,
 		failIfBusy: eventOptions.onBusy == OnBusyFail,
@@ -822,12 +941,14 @@ func (c *Container[T, K]) Emit(ctx context.Context, eventName string, event any,
 	if eventOptions.target != "" {
 		return c.emitToTarget(ctx, evt, eventOptions)
 	}
-	debugf(c.logger, "emitted event %s", eventName)
+	if debugOn(c.logger) {
+		debugf(c.logger, "emitted event %s", eventName)
+	}
 	if evt.waitRemote {
 		evt.call = &emitCall{replyF: eventOptions.replyF}
 	}
 
-	c.runEvent(context.WithValue(ctx, transitionCtxKey{}, transitionCtx{container: c, depth: tc.depth + 1}), evt)
+	c.runEvent(context.WithValue(ctx, transitionCtxKey{}, &transitionCtx{container: c, depth: tc.depth + 1}), evt)
 	c.releaseEvent(evt)
 	if evt.call == nil {
 		return nil
@@ -848,7 +969,9 @@ func (c *Container[T, K]) emitToTarget(ctx context.Context, evt *containerEvent,
 	if c.targetF == nil {
 		return fmt.Errorf("emitting event %s to container %s: only containers of a node can call other containers", evt.name, options.target)
 	}
-	debugf(c.logger, "emitted event %s to container %s", evt.name, options.target)
+	if debugOn(c.logger) {
+		debugf(c.logger, "emitted event %s to container %s", evt.name, options.target)
+	}
 
 	var reply any
 	var err error
@@ -859,7 +982,10 @@ func (c *Container[T, K]) emitToTarget(ctx context.Context, evt *containerEvent,
 			reply, err = c.targetF(ctx, options.target, evt.name, evt.payload, true, evt.failIfBusy, path, evt.trace)
 		})
 	} else {
-		reply, err = c.targetF(ctx, options.target, evt.name, evt.payload, evt.waitRemote, evt.failIfBusy, evt.waitPath, evt.trace)
+		// a reader gives its slot back meanwhile (WithMaxReaders)
+		c.withoutReadSlot(func() {
+			reply, err = c.targetF(ctx, options.target, evt.name, evt.payload, evt.waitRemote, evt.failIfBusy, evt.waitPath, evt.trace)
+		})
 	}
 	if err != nil {
 		return fmt.Errorf("event %s in container %s: %w", evt.name, options.target, err)
@@ -875,7 +1001,7 @@ func (c *Container[T, K]) emitToTarget(ctx context.Context, evt *containerEvent,
 // earlier one. A reply to another node must be a protobuf message. It returns ErrNotInTransition with another ctx and
 // ErrNoCaller if nobody waits for the event.
 func (c *Container[T, K]) Reply(ctx context.Context, reply any) error {
-	if tc, ok := ctx.Value(transitionCtxKey{}).(transitionCtx); !ok || tc.container != any(c) {
+	if tc, ok := ctx.Value(transitionCtxKey{}).(*transitionCtx); !ok || tc.container != any(c) {
 		return ErrNotInTransition
 	}
 	replied := false
@@ -971,7 +1097,9 @@ func (c *Container[T, K]) waitServing(call func()) {
 			if c.metrics != nil {
 				c.metrics.eventsInterleaved.Add(1)
 			}
-			debugf(c.logger, "running event %s while a transition waits", evt.name)
+			if debugOn(c.logger) {
+				debugf(c.logger, "running event %s while a transition waits", evt.name)
+			}
 			// on the container's ctx: the event isn't part of the waiting transition
 			c.processEventLocked(c.ctx, evt)
 		}
@@ -1038,12 +1166,16 @@ func (c *Container[T, K]) matches(t *Transition, eventName string) bool {
 // executeOrQueue executes the transition with the event, or queues the event if the transition batches.
 // The executed actions release the event again.
 func (c *Container[T, K]) executeOrQueue(ctx context.Context, t *Transition, evt *containerEvent, saveAfter bool) bool {
+	// a round batch keeps the payload, not the event: the event is done without waiting for the batch (round_batch.go)
+	if t.roundBatch {
+		return c.queueRoundBatch(ctx, t, evt, saveAfter)
+	}
 	evt.refs++
 
 	// if a transitions batch is configured to be only one event,
 	// then we can just send the event to the transition without needing to queue
 	if t.Batching.Count <= 1 {
-		return c.executeActions(ctx, t, []*containerEvent{evt}, saveAfter)
+		return c.executeActions(ctx, t, evt.one(), saveAfter)
 	}
 
 	if c.transitionQueues == nil {
@@ -1067,6 +1199,7 @@ func (c *Container[T, K]) executeOrQueue(ctx context.Context, t *Transition, evt
 			// if not, it already fired and its func returns without work because it is not the current timer anymore
 			if transitionTimer.Stop() {
 				c.donePending()
+				c.round.node.runsOn(-1)
 			}
 			delete(c.transitionTimers, t.Name)
 		}
@@ -1154,7 +1287,9 @@ func (c *Container[T, K]) processRemote(ctx context.Context, evt *containerEvent
 		c.lent.Store(&chain)
 	}
 
-	debugf(c.logger, "processing %d events %s forwarded by another node", len(r.payloads), evt.name)
+	if debugOn(c.logger) {
+		debugf(c.logger, "processing %d events %s forwarded by another node", len(r.payloads), evt.name)
+	}
 
 	// the transitions and the save func after them see the hand-over they run for (HandOverId); a transition waiting
 	// meanwhile in a reentrant container sees its own again
@@ -1195,7 +1330,9 @@ func (c *Container[T, K]) processRemote(ctx context.Context, evt *containerEvent
 			if !c.receives(t, r) || slices.Contains(r.exclude, t.Name) || !c.matches(t, evt.name) {
 				continue
 			}
-			debugf(c.logger, "transition %s matches conditions of a forwarded event", t.Name)
+			if debugOn(c.logger) {
+				debugf(c.logger, "transition %s matches conditions of a forwarded event", t.Name)
+			}
 
 			if c.traceF != nil && !slices.Contains(ran, t.Name) {
 				ran = append(ran, t.Name)
@@ -1262,7 +1399,7 @@ func (c *Container[T, K]) storeSnapshot() {
 	if e := proto.Message(c.builder.Build()); isNilMessage(e) || e.ProtoReflect() == nil {
 		snap.entityType, snap.entityJSON = toJSON(e)
 	} else {
-		snap.entity = proto.Clone(e)
+		snap.entity = c.sharedEntity(e)
 	}
 	for name, q := range c.transitionQueues {
 		snap.batches[name] = uint32(len(q.events))
@@ -1292,15 +1429,19 @@ func (s *containerSnapshot) info(info *service.ContainerInfo) {
 // startBatchTimer starts a timer which executes the queued events of a transition
 // when not enough events arrived within the batching period.
 func (c *Container[T, K]) startBatchTimer(ctx context.Context, t *Transition) {
-	// the running timer is pending work, so the container does not close before it executed
+	// the running timer is pending work, so the container does not close before it executed; a round ending meanwhile
+	// fails with ErrRoundOverlap
 	c.addPending(false)
+	rounds := c.round.node
+	rounds.runsOn(1)
 
 	var transitionTimer *time.Timer
 	transitionTimer = time.AfterFunc(t.Batching.Period, func() {
 		defer c.donePending()
+		defer rounds.runsOn(-1)
 
-		c.mu.Lock()
-		defer c.mu.Unlock()
+		c.lockWrite()
+		defer c.unlockWrite()
 
 		// if this is not the current timer, a full batch already executed its events
 		if c.transitionTimers[t.Name] != transitionTimer {
@@ -1368,17 +1509,20 @@ func (c *Container[T, K]) executeActions(ctx context.Context, t *Transition, eve
 		}
 	}()
 
-	payloads := mapSlice(events, func(e *containerEvent) any { return e.payload })
+	// the payloads as a slice, made for a remote transition or a func batching events
+	var payloads []any
 
 	if t.Remote {
-		c.forward(ctx, t, events, payloads)
+		c.forward(ctx, t, events, mapSlice(events, payloadOf))
 		return saveAfter
 	}
 
 	for _, action := range t.Actions {
 		switch stateOrFunc := action.(type) {
 		case Bits:
-			debugf(c.logger, "executing state transition %s", t.Name)
+			if debugOn(c.logger) {
+				debugf(c.logger, "executing state transition %s", t.Name)
+			}
 
 			entity := c.builder.Build()
 			entityBitmap := c.getBitmapByTypeF(entity, c.currentBitmap())
@@ -1390,8 +1534,8 @@ func (c *Container[T, K]) executeActions(ctx context.Context, t *Transition, eve
 			// replace the bits of every property the state action sets
 			c.setState(entityBitmap.Name, mergeState(entityBitmap, c.states[entityBitmap.Name], stateOrFunc))
 
-			// update entity with state
-			ApplyStateToEntity(entity, c.states[entityBitmap.Name], entityBitmap)
+			// update entity with state (in immutable mode a copy replacing it)
+			c.applyState(entity, c.states[entityBitmap.Name], entityBitmap)
 
 			if t.SaveOnChange {
 				saveAfter = true
@@ -1403,15 +1547,20 @@ func (c *Container[T, K]) executeActions(ctx context.Context, t *Transition, eve
 			prevEvents := c.callEvents
 			c.callEvents = events
 
-			debugf(c.logger, "executing func transition %s", t.Name)
+			if debugOn(c.logger) {
+				debugf(c.logger, "executing func transition %s", t.Name)
+			}
 
 			if t.Batching.Count == 1 {
-				skipSave, err = stateOrFunc(c.withTransition(ctx), c, payloads[0])
+				skipSave, err = stateOrFunc(c.withTransition(ctx), c, events[0].payload)
 				if err != nil {
 					debugf(c.logger, "func transition %s failed: %v", t.Name, err)
 					c.actionFailed(err, events)
 				}
 			} else {
+				if payloads == nil {
+					payloads = mapSlice(events, payloadOf)
+				}
 				skipSave, err = stateOrFunc(c.withTransition(ctx), c, payloads)
 				if err != nil {
 					debugf(c.logger, "func transition %s failed: %v", t.Name, err)
@@ -1476,9 +1625,13 @@ func (c *Container[T, K]) forward(ctx context.Context, t *Transition, events []*
 	}
 
 	if wait {
-		debugf(c.logger, "forwarding %d events %s and lending the lock", len(events), t.EventName)
+		if debugOn(c.logger) {
+			debugf(c.logger, "forwarding %d events %s and lending the lock", len(events), t.EventName)
+		}
 	} else {
-		debugf(c.logger, "forwarding %d events %s", len(events), t.EventName)
+		if debugOn(c.logger) {
+			debugf(c.logger, "forwarding %d events %s", len(events), t.EventName)
+		}
 	}
 
 	var waitPath []string
@@ -1541,9 +1694,10 @@ func (c *Container[T, K]) forward(ctx context.Context, t *Transition, events []*
 		base = sent.ProtoReflect()
 	}
 	// one result is merged into the sent entity, the builder's: nothing else changes it while the container waits.
-	// Several results are merged into a copy, each compared with the sent entity.
+	// Several results are merged into a copy, each compared with the sent entity; in immutable mode one result too
+	// (the sent entity is published).
 	mergeInto := func(base protoreflect.Message) protoreflect.Message {
-		if len(results) == 1 {
+		if len(results) == 1 && !c.rw.immutable {
 			return base
 		}
 		return proto.Clone(base.Interface()).ProtoReflect()
@@ -1725,7 +1879,7 @@ func (c *Container[T, K]) releaseEvent(evt *containerEvent) {
 		}
 		r.err = errors.Join(r.errs...)
 		if entity := proto.Message(c.builder.Build()); !isNilMessage(entity) {
-			r.result = proto.Clone(entity)
+			r.result = c.sharedEntity(entity)
 		}
 	}
 	if evt.closeAfter {
@@ -1817,14 +1971,11 @@ func (c *Container[T, K]) Event(eventName string, event any, opts ...EventOption
 	}
 
 	var eventOptions eventOptions
-	for _, opt := range opts {
-		opt.apply(&eventOptions)
-	}
+	applyEventOptions(&eventOptions, opts)
 
 	evt := &containerEvent{
 		payload:    event,
 		name:       eventName,
-		opts:       opts,
 		doneC:      eventOptions.doneC,
 		waitRemote: eventOptions.waitRemote,
 		failIfBusy: eventOptions.onBusy == OnBusyFail,
@@ -1834,6 +1985,14 @@ func (c *Container[T, K]) Event(eventName string, event any, opts ...EventOption
 	// an event sent to the container starts a trace, events of other nodes come with theirs
 	if c.traceF != nil && evt.remote == nil {
 		evt.trace = &service.TraceRef{TraceId: newTraceId()}
+	}
+	// read events don't wait in the mailbox
+	if c.dispatchRead(evt) {
+		return nil
+	}
+	if eventOptions.readCall {
+		c.endPending(true)
+		return errNotRead
 	}
 	c.eventsC <- evt
 	c.containerProcessing.scheduleEvent()
@@ -1985,6 +2144,7 @@ func NewContainer[T proto.Message, K Builder[T]](
 		containerProcessing: newContainerProcessing(containerOpts.maxInFlight),
 		id:                  id,
 		builder:             createBuilderF(),
+		rw:                  rwContainer[T, K]{newBuilderF: createBuilderF},
 		bitmap:              bitmap,
 		transitions:         newPublishedTransitions(transitions),
 		getBitmapByTypeF:    getBitmapByTypeF,
@@ -2014,6 +2174,7 @@ func NewContainer[T proto.Message, K Builder[T]](
 	if containerOpts.reentrant != nil {
 		c.reentrant = *containerOpts.reentrant
 	}
+	c.rw.setMode(&containerOpts)
 
 	return c
 }

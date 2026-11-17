@@ -272,6 +272,40 @@ var _ = Describe("Lock table deadlock check", func() {
 		l, _, _ := lt.get("m")
 		Expect(l.calls).To(BeEmpty())
 	})
+
+	It("should let a read call join a container waiting for the caller, without wait edges", func() {
+		readJoin := func(node, id, token, joinToken string, path ...string) (joined, refused bool) {
+			_, after, err := lt.applyAcquireCall(node, t0, id, token, path, joinToken, false, true)
+			return after.called(token), err != nil
+		}
+		By("p calling q, which gets the lock")
+		_, refused := call("c", "q", "tq", "tp")
+		Expect(refused).To(BeFalse())
+
+		By("q calling p back with a writer: refused")
+		joined, refused := join("a", "p", "x1", "tp", "tp", "tq")
+		Expect(joined).To(BeFalse())
+		Expect(refused).To(BeTrue())
+
+		By("q calling p back with a reader: joins")
+		joined, refused = readJoin("a", "p", "x2", "tp", "tp", "tq")
+		Expect(joined).To(BeTrue())
+		Expect(refused).To(BeFalse())
+		l, _, _ := lt.get("p")
+		Expect(l.calls).To(Equal([]lockCall{{token: "x2", waitPath: []string{"tp", "tq"}, read: true}}))
+		Expect(lt.waitedFor["tq"]).NotTo(HaveKey("p"))
+
+		By("p calling q again queues: the read call doesn't make q wait for p")
+		_, refused = call("c", "q", "x3", "tp")
+		Expect(refused).To(BeFalse())
+
+		By("a read call which doesn't join waits for the lock, deadlock-checked")
+		_, refused = readJoin("a", "p", "x4", "", "tq")
+		Expect(refused).To(BeTrue())
+
+		By("the snapshot and client updates keep the mode")
+		Expect(lockFromProto(lockToProto("p", l))).To(Equal(l))
+	})
 })
 
 var _ = Describe("Lock table wait path index", func() {
@@ -317,7 +351,7 @@ var _ = Describe("Lock table wait path index", func() {
 				if l, ok := lt.locks[id]; ok && r.IntN(2) == 0 {
 					join = l.token
 				}
-				lt.applyAcquire(node, t0, id, token, path, join, false)
+				lt.applyAcquireCall(node, t0, id, token, path, join, false, r.IntN(3) == 0)
 				tokens = append(tokens, token)
 			case 2:
 				lt.applyRelease(node, t0, id, old)

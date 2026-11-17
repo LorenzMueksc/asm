@@ -27,6 +27,8 @@ type (
 		onBusy OnBusy
 		// deferred queues the emitted event in the outbox until the next round barrier (WithDeferred, outbox.go)
 		deferred bool
+		// readCall: a call the lock table let join as a read (callContainer) runs as a reader or not at all
+		readCall bool
 	}
 	// remoteExecution is set on the events a node receives from another node.
 	// The node runs its own func transitions matching the payloads, except the excluded ones.
@@ -81,12 +83,64 @@ func newFuncEventOption(f func(*eventOptions)) *funcEventOption {
 	}
 }
 
+// The options of the hot paths (WithDoneChannel, WithWaitRemote, WithTarget, WithDeferred) are types of their own:
+// Event and Emit apply them by type (applyEventOptions), so their eventOptions stay on the stack.
+type (
+	doneChannelOption struct{ doneC chan<- struct{} }
+	targetOption      struct{ id string }
+	// flagEventOption sets one flag; one shared value per flag
+	flagEventOption uint8
+)
+
+const (
+	waitRemoteFlag flagEventOption = iota
+	deferredFlag
+)
+
+var (
+	waitRemoteOption EventOption = waitRemoteFlag
+	deferredOption   EventOption = deferredFlag
+)
+
+func (o *doneChannelOption) apply(options *eventOptions) { options.doneC = o.doneC }
+func (o *targetOption) apply(options *eventOptions)      { options.target = o.id }
+func (o flagEventOption) apply(options *eventOptions) {
+	switch o {
+	case waitRemoteFlag:
+		options.waitRemote = true
+	case deferredFlag:
+		options.deferred = true
+	}
+}
+
+// applyEventOptions applies the options to o. Those of the hot paths are applied by type: o stays on the caller's
+// stack. Any other option is applied, with the ones after it, to a copy on the heap (a call through an interface
+// would move o there).
+func applyEventOptions(o *eventOptions, opts []EventOption) {
+	for i, opt := range opts {
+		switch v := opt.(type) {
+		case *doneChannelOption:
+			o.doneC = v.doneC
+		case *targetOption:
+			o.target = v.id
+		case flagEventOption:
+			v.apply(o)
+		default:
+			p := new(eventOptions)
+			*p = *o
+			for _, opt := range opts[i:] {
+				opt.apply(p)
+			}
+			*o = *p
+			return
+		}
+	}
+}
+
 // WithDoneChannel signals the channel once the event went through all matching transitions.
 // The send blocks, so use a buffered channel.
 func WithDoneChannel(doneC chan<- struct{}) EventOption {
-	return newFuncEventOption(func(options *eventOptions) {
-		options.doneC = doneC
-	})
+	return &doneChannelOption{doneC: doneC}
 }
 
 // WithWaitRemote waits for remote transitions matching the event: the container lends its lock to the owner,
@@ -94,9 +148,7 @@ func WithDoneChannel(doneC chan<- struct{}) EventOption {
 // Without it the work is handed over to the owner, which executes it in its own container
 // once this container released the lock.
 func WithWaitRemote() EventOption {
-	return newFuncEventOption(func(options *eventOptions) {
-		options.waitRemote = true
-	})
+	return waitRemoteOption
 }
 
 // WithTarget runs an emitted event in the container of another id of the same entity, on that container's own lock,
@@ -105,9 +157,7 @@ func WithWaitRemote() EventOption {
 // deadlock is refused with ErrWouldDeadlock. Without it the work is handed over to the target container.
 // Only for Container.Emit of a container of a node.
 func WithTarget(id string) EventOption {
-	return newFuncEventOption(func(options *eventOptions) {
-		options.target = id
-	})
+	return &targetOption{id: id}
 }
 
 // WithReply gets the replies the receivers' transitions set with Container.Reply for an event emitted with

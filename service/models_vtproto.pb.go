@@ -310,6 +310,7 @@ func (m *ContainerLock) CloneVT() *ContainerLock {
 	r.Join = m.Join
 	r.FailIfBusy = m.FailIfBusy
 	r.Busy = m.Busy
+	r.Read = m.Read
 	if rhs := m.WaitPath; rhs != nil {
 		tmpContainer := make([]string, len(rhs))
 		copy(tmpContainer, rhs)
@@ -407,6 +408,7 @@ func (m *NodeSnapshot_Lock_Call) CloneVT() *NodeSnapshot_Lock_Call {
 	}
 	r := new(NodeSnapshot_Lock_Call)
 	r.Token = m.Token
+	r.Read = m.Read
 	if rhs := m.WaitPath; rhs != nil {
 		tmpContainer := make([]string, len(rhs))
 		copy(tmpContainer, rhs)
@@ -1026,6 +1028,9 @@ func (this *ContainerLock) EqualVT(that *ContainerLock) bool {
 	if this.Busy != that.Busy {
 		return false
 	}
+	if this.Read != that.Read {
+		return false
+	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
 
@@ -1144,6 +1149,9 @@ func (this *NodeSnapshot_Lock_Call) EqualVT(that *NodeSnapshot_Lock_Call) bool {
 		if vx != vy {
 			return false
 		}
+	}
+	if this.Read != that.Read {
+		return false
 	}
 	return string(this.unknownFields) == string(that.unknownFields)
 }
@@ -2072,6 +2080,16 @@ func (m *ContainerLock) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
 	}
+	if m.Read {
+		i--
+		if m.Read {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x38
+	}
 	if m.Busy {
 		i--
 		if m.Busy {
@@ -2338,6 +2356,16 @@ func (m *NodeSnapshot_Lock_Call) MarshalToSizedBufferVT(dAtA []byte) (int, error
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.Read {
+		i--
+		if m.Read {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x18
 	}
 	if len(m.WaitPath) > 0 {
 		for iNdEx := len(m.WaitPath) - 1; iNdEx >= 0; iNdEx-- {
@@ -2956,6 +2984,9 @@ func (m *ContainerLock) SizeVT() (n int) {
 	if m.Busy {
 		n += 2
 	}
+	if m.Read {
+		n += 2
+	}
 	n += len(m.unknownFields)
 	return n
 }
@@ -3044,6 +3075,9 @@ func (m *NodeSnapshot_Lock_Call) SizeVT() (n int) {
 			l = len(s)
 			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 		}
+	}
+	if m.Read {
+		n += 2
 	}
 	n += len(m.unknownFields)
 	return n
@@ -5126,6 +5160,26 @@ func (m *ContainerLock) UnmarshalVT(dAtA []byte) error {
 				}
 			}
 			m.Busy = bool(v != 0)
+		case 7:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Read", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Read = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
@@ -5660,6 +5714,26 @@ func (m *NodeSnapshot_Lock_Call) UnmarshalVT(dAtA []byte) error {
 			}
 			m.WaitPath = append(m.WaitPath, string(dAtA[iNdEx:postIndex]))
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Read", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Read = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])

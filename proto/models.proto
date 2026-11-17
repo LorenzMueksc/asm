@@ -121,6 +121,9 @@ message ContainerLock {
   bool fail_if_busy = 5;
   // only in the refusals sent to a client (AttachUpdate.refused): refused because the lock was busy
   bool busy = 6;
+  // acquire of a waited call joining (join) to run a read event: it runs next to the holder's writer and waits for
+  // nobody, so it is never refused as a deadlock and the containers on its wait path don't wait for the holder
+  bool read = 7;
 }
 
 // ClientNode is a node without raft (WithClientMode): it uses the lock table through a raft member.
@@ -163,6 +166,8 @@ message NodeSnapshot {
       string token = 1;
       // lock tokens of the containers waiting for the call
       repeated string wait_path = 2;
+      // a call of a read event (ContainerLock.read): the containers on its path don't wait for the holder
+      bool read = 3;
     }
     // waited calls running in the holder's container, or waiting for their turn there
     repeated Call calls = 5;

@@ -27,6 +27,8 @@ import (
 // the path, directly or through other locks: waiting would close a cycle. Every node decides the same from the log.
 // Waited calls wait nowhere else: not for a container slot, not for a start of the id on their node, and an open
 // container of the id is only joined through the lock table (join). A call ends with LOCK_DONE.
+// A call joining to run a read event (read, WithReadOnly) runs next to the holder's writer and waits for nobody: it is
+// never refused as a deadlock, and the containers on its path don't wait for the holder. Only writers close cycles.
 //
 // A node keeps the lock of a closed container (retained) until another node queues for it, then it releases it right
 // away; opening the container again on the node needs no log entry. A node leaving the cluster releases on close.
@@ -77,6 +79,9 @@ type (
 	lockCall struct {
 		token    string
 		waitPath []string
+		// read: the call runs a read event next to the holder's writer, the containers on its path don't wait for
+		// the holder
+		read bool
 	}
 	nodeLiveness struct {
 		last  time.Time
@@ -132,7 +137,8 @@ func (l containerLock) called(token string) bool {
 	return slices.ContainsFunc(l.calls, func(c lockCall) bool { return c.token == token })
 }
 
-// waitPaths calls f with every wait path of the waiters and calls of the lock.
+// waitPaths calls f with every wait path of the waiters and calls of the lock, except the paths of read calls: their
+// containers don't wait for the holder.
 func (l containerLock) waitPaths(f func(path []string)) {
 	for _, w := range l.queue {
 		if len(w.waitPath) > 0 {
@@ -140,7 +146,9 @@ func (l containerLock) waitPaths(f func(path []string)) {
 		}
 	}
 	for _, c := range l.calls {
-		f(c.waitPath)
+		if !c.read {
+			f(c.waitPath)
+		}
 	}
 }
 
@@ -334,6 +342,13 @@ func (lt *lockTable) putLocked(id string, l containerLock) {
 // while others wait for it. Joining isn't refused, the node checks its container before.
 // It returns the lock before and after, and why the acquire was refused (ErrWouldDeadlock, ErrBusy), nil if not.
 func (lt *lockTable) applyAcquire(nodeId string, at time.Time, id, token string, waitPath []string, join string, failIfBusy bool) (before, after containerLock, refused error) {
+	return lt.applyAcquireCall(nodeId, at, id, token, waitPath, join, failIfBusy, false)
+}
+
+// applyAcquireCall is applyAcquire for a call which may run a read event (read): joining the holder's container it
+// runs next to the writer, so it is never refused as a deadlock and adds no wait edges. A read call which doesn't join
+// waits for the lock like any other.
+func (lt *lockTable) applyAcquireCall(nodeId string, at time.Time, id, token string, waitPath []string, join string, failIfBusy, read bool) (before, after containerLock, refused error) {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
 
@@ -352,6 +367,9 @@ func (lt *lockTable) applyAcquire(nodeId string, at time.Time, id, token string,
 		}
 	case after.holder == nodeId && after.token == token, after.queued(nodeId, token), after.called(token):
 		// proposed again, eg. to have an expired holder replaced
+	case read && len(waitPath) > 0 && join != "" && after.holder == nodeId && after.token == join:
+		// a read call doesn't wait for the holder's writer: no cycle, no edges
+		after.calls = append(slices.Clone(after.calls), lockCall{token: token, waitPath: waitPath, read: true})
 	case len(waitPath) > 0 && lt.waitsForLocked(after.token, waitPath):
 		refused = ErrWouldDeadlock
 	case failIfBusy && after.holder != nodeId:
@@ -503,7 +521,7 @@ func lockLog(nodeId string, t service.NodeEventType, lock *service.ContainerLock
 // While another node holds it, this node waits in its queue until the lock is handed to it, or ctx is done.
 // Giving up cancels the place in the queue.
 // Without raft no lock is needed and the token is empty.
-func (n *Node[T, K]) acquireLock(ctx context.Context, id string, waitPath []string, join string, failIfBusy bool) (token string, joined bool, err error) {
+func (n *Node[T, K]) acquireLock(ctx context.Context, id string, waitPath []string, join string, failIfBusy, read bool) (token string, joined bool, err error) {
 	if n.skipRaft {
 		return "", false, nil
 	}
@@ -512,7 +530,7 @@ func (n *Node[T, K]) acquireLock(ctx context.Context, id string, waitPath []stri
 	}
 
 	token = n.newLockToken()
-	l := lockLog(n.Id(), service.NodeEventType_LOCK_ACQUIRE, &service.ContainerLock{ContainerId: id, Token: token, WaitPath: waitPath, Join: join, FailIfBusy: failIfBusy})
+	l := lockLog(n.Id(), service.NodeEventType_LOCK_ACQUIRE, &service.ContainerLock{ContainerId: id, Token: token, WaitPath: waitPath, Join: join, FailIfBusy: failIfBusy, Read: read})
 
 	// the token is in use from now until it gave up or its lock is released. A lock handed to a token
 	// which isn't in use anymore is released (see lockChanged). The token stays in use on success: the apply
@@ -852,7 +870,7 @@ func (n *Node[T, K]) applyLockLog(l *service.NodeLog) {
 	switch l.GetType() {
 	case service.NodeEventType_LOCK_ACQUIRE:
 		var refused error
-		before, after, refused = n.locks.applyAcquire(l.GetNodeId(), at, cl.GetContainerId(), cl.GetToken(), cl.GetWaitPath(), cl.GetJoin(), cl.GetFailIfBusy())
+		before, after, refused = n.locks.applyAcquireCall(l.GetNodeId(), at, cl.GetContainerId(), cl.GetToken(), cl.GetWaitPath(), cl.GetJoin(), cl.GetFailIfBusy(), cl.GetRead())
 		if refused != nil {
 			if errors.Is(refused, ErrBusy) {
 				debugf(n.logger, "refused lock of container %s for node %s: it is busy", cl.GetContainerId(), l.GetNodeId())

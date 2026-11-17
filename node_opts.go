@@ -41,6 +41,9 @@ type (
 		keepAlive         *time.Duration
 		// reentrant is the default of the containers of the node (WithReentrant), nil if they aren't
 		reentrant *reentrance
+		// containerModes are container options of the node's entity mode and reader cap (WithImmutableEntities,
+		// WithImmutableEntityCheck, WithMaxReadersPerContainer), added to the node's hooks
+		containerModes []ContainerOption
 		// region of the node (WithRegion)
 		region        string
 		traceCapacity int

@@ -223,6 +223,45 @@ func BenchmarkLocalEvent(b *testing.B) {
 	c.Close()
 }
 
+// BenchmarkLocalEventReaders is BenchmarkLocalEvent on a node which also has a read-only transition: every writer
+// publishes the entity for readers, a copy by default, the entity itself in immutable mode (WithImmutableEntities).
+// No reader runs: the numbers are the writer's cost of the publish.
+func BenchmarkLocalEventReaders(b *testing.B) {
+	for _, mode := range []string{"copy", "immutable"} {
+		b.Run(mode, func(b *testing.B) {
+			opts := []NodeSetupOption{WithSkipRaft(), WithBitmap(clusterBitmap("pending", "done")), WithLogger(zap.NewNop())}
+			if mode == "immutable" {
+				opts = append(opts, WithImmutableEntities())
+			}
+			n := NewNode(1, clusterBitmapByType, func() *stringValueBuilder { return &stringValueBuilder{} }, "", opts...)
+			f := func(ctx context.Context, c *Container[*wrapperspb.StringValue, *stringValueBuilder], a any) (bool, error) {
+				return false, nil
+			}
+			n.AddFuncTransition("work", "WORK", f)
+			n.AddFuncTransition("peek", "PEEK", f, WithReadOnly())
+			defer n.Shutdown()
+
+			c, _, err := n.StartContainer(context.Background(), "local")
+			if err != nil {
+				b.Fatal(err)
+			}
+			c.Builder().Set(wrapperspb.String("pending"))
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				doneC := make(chan struct{}, 1)
+				if err := c.Event("WORK", wrapperspb.Int64(1), WithDoneChannel(doneC)); err != nil {
+					b.Fatal(err)
+				}
+				<-doneC
+			}
+			b.StopTimer()
+			c.Close()
+		})
+	}
+}
+
 // BenchmarkStartClose measures starting and closing a container on a follower:
 // one lock acquire and one release through the raft log.
 func BenchmarkStartClose(b *testing.B) {

@@ -309,7 +309,7 @@ var _ = Describe("Rounds", func() {
 			Expect(time.Since(start)).To(BeNumerically("<", 12*20*time.Millisecond))
 		})
 
-		It("should return an unknown target as error and deliver the other events", func() {
+		It("should return an unknown target as error, deliver nothing and keep the outboxes", func() {
 			cs := startRoundContainers(n, "a", "b")
 			sendAndWait(cs[0], "START", &TestEvent{Value: "nobody"})
 			sendAndWait(cs[1], "START", &TestEvent{Value: "a"})
@@ -317,12 +317,51 @@ var _ = Describe("Rounds", func() {
 			err := n.Round(context.Background(), "one")
 			Expect(err).To(MatchError(ErrUnknownTarget))
 			Expect(err).To(MatchError(ContainSubstring("container nobody")))
-			Expect(log.get()).To(ContainElement(`a got  in "one" (node in "one")`))
+			Expect(log.get()).To(HaveLen(2))
+			Expect(n.RoundName()).To(BeEmpty())
 
-			By("delivering to a container closed meanwhile neither")
+			By("delivering everything once the target is open")
+			startRoundContainers(n, "nobody")
+			Expect(n.Round(context.Background(), "two")).To(Succeed())
+			Expect(log.get()[2:]).To(ConsistOf(`a got  in "two" (node in "two")`, `nobody got  in "two" (node in "two")`))
+
+			By("failing for a container closed meanwhile, and dropping the outboxes")
 			sendAndWait(cs[0], "START", &TestEvent{Value: "b"})
 			cs[1].Close()
-			Expect(n.Round(context.Background(), "two")).To(MatchError(ErrUnknownTarget))
+			Expect(n.Round(context.Background(), "three")).To(MatchError(ErrUnknownTarget))
+			Expect(n.Round(context.Background(), "three")).To(MatchError(ErrUnknownTarget))
+			Expect(n.DropOutboxes(context.Background())).To(Equal(1))
+			Expect(n.Round(context.Background(), "four")).To(Succeed())
+			Expect(log.get()).To(HaveLen(5))
+		})
+
+		It("should fail a round whose hand-over without wait or batch timer runs on after it", func() {
+			n.AddFuncTransition("hand", "HAND", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
+				// handed over without waiting: it runs in b on its own
+				return false, c.Emit(ctx, "SLEEP", nil, WithTarget("b"))
+			})
+			n.AddFuncTransition("sleep", "SLEEP", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
+				time.Sleep(200 * time.Millisecond)
+				return false, nil
+			})
+			n.AddFuncTransition("batch", "BATCH", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
+				return false, nil
+			}, WithBatching(10, 200*time.Millisecond))
+			n.AddFuncTransition("send", "SEND", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
+				return false, c.Emit(ctx, a.(*TestEvent).Value, nil, WithTarget("a"), WithDeferred())
+			})
+			cs := startRoundContainers(n, "a", "b")
+
+			sendAndWait(cs[1], "SEND", &TestEvent{Value: "HAND"})
+			Expect(n.Round(context.Background(), "one")).To(MatchError(ErrRoundOverlap))
+			Eventually(n.rounds.background.Load).Should(BeZero())
+			Expect(n.Round(context.Background(), "two")).To(Succeed())
+
+			By("a batch timer")
+			sendAndWait(cs[1], "SEND", &TestEvent{Value: "BATCH"})
+			Expect(n.Round(context.Background(), "three")).To(MatchError(ContainSubstring("1 hand-overs without wait or batch timers")))
+			Eventually(n.rounds.background.Load).Should(BeZero())
+			Expect(n.Round(context.Background(), "four")).To(Succeed())
 		})
 
 		It("should return the error of the container with the lowest id and pass all to the error func", func() {
@@ -388,7 +427,9 @@ var _ = Describe("Rounds", func() {
 	})
 })
 
-// BenchmarkRound measures rounds of 10k containers: empty ones, and ones delivering one event to every container.
+// BenchmarkRound measures rounds of 10k containers: empty ones, ones delivering one event to every container, ones
+// running a round batch of every container with one event each (the batch path), and ones running the round batch of
+// every container without events (WithRunAll).
 //
 //	go test . -run '^$' -bench BenchmarkRound -benchmem
 func BenchmarkRound(b *testing.B) {
@@ -398,6 +439,16 @@ func BenchmarkRound(b *testing.B) {
 	// TICK sends TICK to the container its value names, delivered in the next round
 	n.AddFuncTransition("tick", "TICK", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
 		return false, c.Emit(ctx, "TICK", a, WithTarget(a.(*TestEvent).Value), WithDeferred())
+	})
+	// STEP is a round batch which sends STEP to its container for the next round if it got one: KICK starts it
+	n.AddFuncTransition("step", "STEP", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
+		if len(a.([]Message)) == 0 {
+			return false, nil
+		}
+		return false, c.Emit(ctx, "STEP", nil, WithTarget(c.Id()), WithDeferred())
+	}, WithBatchOnRound())
+	n.AddFuncTransition("kick", "KICK", func(ctx context.Context, c *roundContainer, a any) (bool, error) {
+		return false, c.Emit(ctx, "STEP", nil, WithTarget(c.Id()), WithDeferred())
 	})
 	cs := make([]*roundContainer, containers)
 	for i := range containers {
@@ -432,5 +483,38 @@ func BenchmarkRound(b *testing.B) {
 			}
 		}
 		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/containers, "ns/event")
+	})
+
+	b.Run("batch-per-container", func(b *testing.B) {
+		if _, err := n.DropOutboxes(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		for _, c := range cs {
+			doneC := make(chan struct{}, 1)
+			if err := c.Event("KICK", nil, WithDoneChannel(doneC)); err != nil {
+				b.Fatal(err)
+			}
+			<-doneC
+		}
+		b.ResetTimer()
+		for b.Loop() {
+			if err := n.Round(context.Background(), "batch"); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/containers, "ns/container")
+	})
+
+	b.Run("run-all-empty", func(b *testing.B) {
+		if _, err := n.DropOutboxes(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		b.ResetTimer()
+		for b.Loop() {
+			if err := n.Round(context.Background(), "all", WithRunAll()); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/containers, "ns/container")
 	})
 }

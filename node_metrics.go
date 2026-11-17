@@ -56,10 +56,12 @@ type (
 		containersStarted atomic.Uint64
 		events            atomic.Uint64
 		eventTime         histogram
-		forwards          atomic.Uint64
-		forwardErrors     atomic.Uint64
-		forwardWait       histogram
-		forwardsReceived  atomic.Uint64
+		// entityCopies counts the copies of entities the containers took (countCopy)
+		entityCopies     atomic.Uint64
+		forwards         atomic.Uint64
+		forwardErrors    atomic.Uint64
+		forwardWait      histogram
+		forwardsReceived atomic.Uint64
 		// waited calls sent on to the node holding the target's lock
 		forwardsRedirected atomic.Uint64
 		snapshots          atomic.Uint64
@@ -171,6 +173,7 @@ func (n *Node[T, K]) collectMetrics() []*service.Metric {
 	counter("asm_events_total", "events processed by the containers of this node, forwarded ones included", m.events.Load())
 	counter("asm_events_interleaved_total", "events reentrant containers ran while one of their transitions waited (WithReentrant)", m.eventsInterleaved.Load())
 	hist("asm_event_seconds", "time to process an event, waiting for other nodes included", &m.eventTime)
+	counter("asm_entity_copies_total", "copies of entities the containers took: for readers, a state transition, an execution's result, the trace (copy mode; immutable-entity mode copies for state transitions only)", m.entityCopies.Load())
 
 	counter("asm_forwards_total", "forward requests sent to other nodes", m.forwards.Load())
 	counter("asm_forward_errors_total", "forward requests which failed", m.forwardErrors.Load())

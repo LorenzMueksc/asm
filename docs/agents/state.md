@@ -5,11 +5,11 @@
 - `mergeState` replaces bits per property: a property never holds two values.
 - Per event: event bits merged first, entity bits last → entity wins.
 - Conditions of a transition are ANDed; a matching `AtLeastOne` moves on to the next condition.
-- State transition: merge target bits, then apply to the entity (`ApplyStateToEntity`). Moving backward works.
+- State transition: merge target bits, then apply to the entity (`ApplyStateToEntity`). Moving backward works. Immutable-entity mode: applied to a copy which replaces the entity (`applyState`).
 - After every func transition (also a failed one) the entity is re-evaluated (`EvaluateEntityWithEvents(nil)` in `executeActions`): lower-priority transitions of the same event see its changes.
 - Zero values apply: if 0/false is a bitmap value, an unset field of a state target sets it.
 - Nested structs are modified in place; a new one only when the field is nil.
-- A bitmap must not change once used: `bitmap_tables.go` builds its tables once, cached by `weak.Pointer`. New layouts are new trees (`applyBitmapEntry` clones). Tables never reference the bitmap (else never collected).
+- A bitmap must not change once used: `bitmap_tables.go` builds its tables once, cached by `weak.Pointer`. [A 2026-11-12] `recentTables` (8 entries: weak pointer + tables) is checked first with `weak.Pointer.Value`: `weak.Make` takes a lock of the bitmap's span, contended by every container evaluating states; a collected bitmap's entry no longer matches (also not a new bitmap at its address); up to 8 tables of collected bitmaps stay until replaced. New layouts are new trees (`applyBitmapEntry` clones). Tables never reference the bitmap (else never collected).
 - Field matching: json tag name before the first comma. Unexported fields skipped (evaluate) or printed (apply). A field value matches a bitmap value if it converts to its type and is equal (fast paths string/int64/uint64/float64/bool, else `reflect.Convert`). Values that can't convert aren't applied.
 - `getValue`, `getFieldByJsonName`, `parseValueToType`, `getKeyByBit`: kept only for their specs; hot paths use the tables.
 

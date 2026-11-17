@@ -19,6 +19,13 @@ type (
 		logger                       *zap.Logger
 		// reentrant is set by WithContainerReentrant or WithContainerNotReentrant, nil keeps the default
 		reentrant *reentrance
+		// spawnEntity is the entity of a container started by Spawn (withSpawnEntity, spawn.go)
+		spawnEntity any
+		// immutable: immutable-entity mode (WithImmutableEntity); checkImmutable: its mutation check
+		// (WithImmutableEntityCheck)
+		immutable, checkImmutable bool
+		// maxReaders caps the readers running at once (WithMaxReaders), 0 = no cap
+		maxReaders int
 	}
 	// reentrance tells whether a container runs other events while a transition waits, and which (all if empty)
 	reentrance struct {

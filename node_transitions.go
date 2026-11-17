@@ -40,6 +40,10 @@ type transitionRegistry struct {
 type publishedTransitions struct {
 	all     []*Transition
 	byEvent map[string][]*Transition
+	// rw classifies the events as readers or writers, built on first use (readIndex, rwmode.go)
+	rw rwIndex
+	// rounds lists the round batch transitions, built on first use (roundBatches, round_batch.go)
+	rounds roundBatchIndex
 }
 
 func newPublishedTransitions(ts []*Transition) *publishedTransitions {
@@ -109,6 +113,10 @@ func (n *Node[T, K]) compileTransitions() error {
 // compileTransitionLocked converts the example entities of the transition to bits
 // against the committed bitmap, computes its signature and checks it for conflicts.
 func (n *Node[T, K]) compileTransitionLocked(t *Transition) error {
+	// a round batch is a writer: it can't be read-only (WithReadOnly)
+	if err := checkRoundBatch(t, t.ReadOnly); err != nil {
+		return err
+	}
 	layout := n.layout.Load()
 
 	for _, c := range t.Conditions {

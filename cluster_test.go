@@ -74,14 +74,14 @@ var _ = Describe("Cluster", Label("cluster"), func() {
 	)
 
 	// startNode starts a raft node. A node without joinAddr campaigns and becomes the leader.
-	startNode := func(id int, joinAddr string, bm *Bitmap, setup func(n *clusterNode)) (*clusterNode, string) {
+	startNode := func(id int, joinAddr string, bm *Bitmap, setup func(n *clusterNode), extra ...NodeSetupOption) (*clusterNode, string) {
 		addr := freeAddr()
 		stopC := make(chan struct{})
-		opts := []NodeSetupOption{
+		opts := append([]NodeSetupOption{
 			WithBitmap(bm),
 			WithLogger(zap.NewNop()),
 			WithStopChannel(stopC),
-		}
+		}, extra...)
 		if joinAddr != "" {
 			opts = append(opts, WithJoinAddr(joinAddr))
 		}
@@ -220,6 +220,23 @@ var _ = Describe("Cluster", Label("cluster"), func() {
 			By("not forwarding when the synced conditions do not match")
 			sendAndWait(follower, "c2", "PROMOTE", wrapperspb.String("done"), WithWaitRemote())
 			Expect(calls.Load()).To(Equal(int32(1)))
+		})
+
+		It("should merge the result of a waited forward into a copy in immutable mode", func() {
+			leader, leaderAddr := startNode(1, "", clusterBitmap("pending", "done"), func(n *clusterNode) {
+				n.AddFuncTransition("promote", "PROMOTE", promote("done"), WithFuncKey("promote"))
+			}, WithImmutableEntities(), WithImmutableEntityCheck())
+			ready(leader)
+			follower, _ := startNode(2, leaderAddr, clusterBitmap("pending", "done"), nil, WithImmutableEntities(),
+				WithImmutableEntityCheck())
+			ready(follower)
+
+			sent := wrapperspb.String("pending")
+			c := sendAndWait(follower, "c1", "PROMOTE", sent, WithWaitRemote())
+			Expect(calls.Load()).To(Equal(int32(1)))
+			Expect(c.Builder().Build().GetValue()).To(Equal("done"))
+			// the entity published while the forward waited stays as it was
+			Expect(sent.GetValue()).To(Equal("pending"))
 		})
 
 		It("should forward without waiting by default", func() {

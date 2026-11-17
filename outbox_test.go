@@ -139,4 +139,42 @@ var _ = Describe("Deferred events", func() {
 		Expect(emitErr).To(MatchError(ContainSubstring("only containers of a node")))
 		c.Close()
 	})
+
+	It("should drop the deferred events waiting for the next round and deliver the ones emitted after (DropOutboxes)", func() {
+		n.AddFuncTransition("send", "SEND", func(ctx context.Context, c *Container[*TestStateEntity, *mockBuilder], a any) (bool, error) {
+			record(c.Emit(ctx, "MSG", &TestEvent{Value: "b"}, WithTarget("b"), WithDeferred()))
+			record(c.Emit(ctx, "MSG", &TestEvent{Value: "a"}, WithTarget("a"), WithDeferred()))
+			return false, nil
+		})
+		a, _, err := n.StartContainer(context.Background(), "a")
+		Expect(err).NotTo(HaveOccurred())
+		b, _, err := n.StartContainer(context.Background(), "b")
+		Expect(err).NotTo(HaveOccurred())
+		send(a, "SEND")
+		send(b, "SEND")
+
+		dropped, err := n.DropOutboxes(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dropped).To(Equal(4))
+		Expect(outbox(a)).To(BeEmpty())
+		n.rounds.mu.Lock()
+		Expect(n.rounds.marked).To(BeEmpty())
+		n.rounds.mu.Unlock()
+		Expect(n.Round(context.Background(), "one")).To(Succeed())
+		Expect(received()).To(BeEmpty())
+
+		By("delivering what is emitted after the drop")
+		send(b, "SEND")
+		Expect(n.Round(context.Background(), "two")).To(Succeed())
+		Expect(received()).To(ConsistOf("a got a", "b got b"))
+		Expect(recorded()).To(HaveEach(BeNil()))
+
+		By("waiting for a running round")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		Expect(n.rounds.acquire(context.Background())).To(Succeed())
+		_, err = n.DropOutboxes(ctx)
+		Expect(err).To(MatchError(context.Canceled))
+		n.rounds.release()
+	})
 })

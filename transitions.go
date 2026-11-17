@@ -43,6 +43,9 @@ type (
 		// Entity is the name of the root entity bitmap the transition runs on. Transitions of another entity than
 		// the node's are remote: events matching them go to the containers of their owners.
 		Entity string
+		// ReadOnly marks a func transition which only reads the entity (WithReadOnly, rwmode.go). Local to the node,
+		// not synced to other nodes.
+		ReadOnly bool
 
 		// funcKey identifies the func of a func transition in the signature.
 		// Defaults to the runtime name of the func.
@@ -52,6 +55,8 @@ type (
 		toState any
 		// stateBitmap is the name of the bitmap of the target state of a state transition.
 		stateBitmap string
+		// roundBatch runs the transition once per round with the round's events (WithBatchOnRound, round_batch.go)
+		roundBatch bool
 	}
 	Batching struct {
 		// Count is the number of events it waits for before executing the transition.

@@ -293,7 +293,7 @@ func lockToProto(id string, l containerLock) *service.NodeSnapshot_Lock {
 		lock.Waiters = append(lock.Waiters, &service.NodeSnapshot_Lock_Waiter{Node: w.node, Token: w.token, WaitPath: w.waitPath})
 	}
 	for _, c := range l.calls {
-		lock.Calls = append(lock.Calls, &service.NodeSnapshot_Lock_Call{Token: c.token, WaitPath: c.waitPath})
+		lock.Calls = append(lock.Calls, &service.NodeSnapshot_Lock_Call{Token: c.token, WaitPath: c.waitPath, Read: c.read})
 	}
 	return lock
 }
@@ -304,7 +304,7 @@ func lockFromProto(l *service.NodeSnapshot_Lock) containerLock {
 		lock.queue = append(lock.queue, lockWaiter{node: w.GetNode(), token: w.GetToken(), waitPath: w.GetWaitPath()})
 	}
 	for _, c := range l.GetCalls() {
-		lock.calls = append(lock.calls, lockCall{token: c.GetToken(), waitPath: c.GetWaitPath()})
+		lock.calls = append(lock.calls, lockCall{token: c.GetToken(), waitPath: c.GetWaitPath(), read: c.GetRead()})
 	}
 	return lock
 }

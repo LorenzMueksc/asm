@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"weak"
 )
 
@@ -82,20 +83,41 @@ type (
 
 var bitmapTablesCache sync.Map // weak.Pointer[Bitmap] -> *bitmapTables
 
+// recentTables holds the tables of the bitmaps used last, found without weak.Make: making a weak pointer takes a lock
+// of the bitmap's memory span, which every container evaluating states contends for. An entry's weak pointer no longer
+// returns a bitmap once it was collected, so a new bitmap at its address doesn't match. It keeps up to len tables of
+// collected bitmaps until replaced.
+var (
+	recentTables     [8]atomic.Pointer[recentBitmapTables]
+	recentTablesNext atomic.Uint32
+)
+
+type recentBitmapTables struct {
+	bm weak.Pointer[Bitmap]
+	t  *bitmapTables
+}
+
 // tablesOf returns the lookup tables of the bitmap, building them on first use.
 func tablesOf(bm *Bitmap) *bitmapTables {
-	key := weak.Make(bm)
-	if t, ok := bitmapTablesCache.Load(key); ok {
-		return t.(*bitmapTables)
+	for i := range recentTables {
+		if e := recentTables[i].Load(); e != nil && e.bm.Value() == bm {
+			return e.t
+		}
 	}
 
-	t := &bitmapTables{}
-	t.root = t.buildNode(bm)
-	if actual, loaded := bitmapTablesCache.LoadOrStore(key, t); loaded {
-		return actual.(*bitmapTables)
+	key := weak.Make(bm)
+	t, ok := bitmapTablesCache.Load(key)
+	if !ok {
+		built := &bitmapTables{}
+		built.root = built.buildNode(bm)
+		var loaded bool
+		if t, loaded = bitmapTablesCache.LoadOrStore(key, built); !loaded {
+			runtime.AddCleanup(bm, func(key weak.Pointer[Bitmap]) { bitmapTablesCache.Delete(key) }, key)
+		}
 	}
-	runtime.AddCleanup(bm, func(key weak.Pointer[Bitmap]) { bitmapTablesCache.Delete(key) }, key)
-	return t
+	tables := t.(*bitmapTables)
+	recentTables[recentTablesNext.Add(1)%uint32(len(recentTables))].Store(&recentBitmapTables{bm: key, t: tables})
+	return tables
 }
 
 func (t *bitmapTables) buildNode(bm *Bitmap) *nodeTables {
